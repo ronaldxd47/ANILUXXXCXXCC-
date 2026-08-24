@@ -57,6 +57,7 @@ import com.example.data.StreamEmbed
 import com.example.data.stream.ResolvedStream
 import com.example.data.stream.StreamMediaType
 import com.example.data.stream.StreamResolver
+import com.example.utils.FormatUtils
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Formatter
@@ -85,18 +86,19 @@ fun ExoVideoPlayer(
     var hasPlaybackError by remember(streamUrl) { mutableStateOf(false) }
     var playbackErrorMessage by remember(streamUrl) { mutableStateOf("") }
     
-    // Auto-selected server name
+    // Auto-selected server name & active iframe URL
     var currentServerName by remember(streamUrl) {
         val embed = streamEmbeds.find { it.iframeUrl == streamUrl }
         mutableStateOf(embed?.serverName ?: "Server Default")
     }
+    var activeStreamUrl by remember(streamUrl) { mutableStateOf(streamUrl) }
     
     // Player Lifecycle Manager (Singleton)
     val playerManager = remember(context) { PlayerManager.getInstance(context) }
     var exoPlayer by remember { mutableStateOf<ExoPlayer?>(null) }
 
     // Resolve direct streaming URL with full header preservation and MIME classification
-    LaunchedEffect(streamUrl) {
+    LaunchedEffect(activeStreamUrl, currentServerName) {
         isResolving = true
         resolveErrorMessage = null
         hasPlaybackError = false
@@ -104,12 +106,12 @@ fun ExoVideoPlayer(
         useNativeExo = true
         
         try {
-            val resolved = StreamResolver.resolve(context, streamUrl, currentServerName)
+            val resolved = StreamResolver.resolve(context, activeStreamUrl, currentServerName)
             resolvedStreamState = resolved
             if (resolved.isDirect) {
                 useNativeExo = true
             } else {
-                // If stream cannot be resolved to direct media, use the Web Player Engine sandbox
+                // If stream cannot be resolved to direct media, fallback to Web Player sandbox
                 useNativeExo = false
             }
         } catch (e: Exception) {
@@ -143,51 +145,56 @@ fun ExoVideoPlayer(
     var gestureSeekPreview by remember { mutableStateOf(-1L) }
     var bandwidthSpeedText by remember { mutableStateOf("HD Auto") }
 
-    // Initialize ExoPlayer with headers from ResolvedStream
-    DisposableEffect(streamUrl, resolvedStreamState, playerManager) {
+    // Initialize ExoPlayer strictly when direct native playback is active
+    DisposableEffect(activeStreamUrl, resolvedStreamState, useNativeExo, playerManager) {
         val stream = resolvedStreamState
-        val listener = object : Player.Listener {
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                isPlayingState = isPlaying
-            }
-            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-                isPlayingState = playWhenReady && playbackState != Player.STATE_ENDED
-            }
-            override fun onPlaybackStateChanged(state: Int) {
-                playbackState = state
-                isBuffering = state == Player.STATE_BUFFERING
-                if (state == Player.STATE_READY) {
-                    exoPlayer?.let { duration = it.duration }
-                    hasPlaybackError = false
-                }
-                if (state == Player.STATE_ENDED) {
-                    isPlayingState = false
-                }
-            }
-            override fun onPlayerError(error: PlaybackException) {
-                Log.w("ExoVideoPlayer", "Player error: [${error.errorCodeName}] ${error.message}")
-                hasPlaybackError = true
-                playbackErrorMessage = when (error.errorCode) {
-                    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> "Server video menolak koneksi (HTTP 403/404)"
-                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
-                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "Koneksi jaringan internet terputus atau timeout"
-                    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
-                    PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED -> "Format HLS manifest tidak valid"
-                    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
-                    PlaybackException.ERROR_CODE_DECODING_FAILED -> "Codec video perangkat tidak mendukung stream ini"
-                    else -> "Gagal memutar video: ${error.errorCodeName}"
-                }
-            }
-        }
+        val isDirectReady = stream != null && stream.isDirect && useNativeExo
 
-        val instance = playerManager.initializePlayer(
-            customHeaders = stream?.headers ?: emptyMap(),
-            externalListener = listener
-        )
-        exoPlayer = instance
+        if (isDirectReady) {
+            val listener = object : Player.Listener {
+                override fun onIsPlayingChanged(isPlaying: Boolean) {
+                    isPlayingState = isPlaying
+                }
+                override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                    isPlayingState = playWhenReady && playbackState != Player.STATE_ENDED
+                }
+                override fun onPlaybackStateChanged(state: Int) {
+                    playbackState = state
+                    isBuffering = state == Player.STATE_BUFFERING
+                    if (state == Player.STATE_READY) {
+                        exoPlayer?.let { duration = it.duration }
+                        hasPlaybackError = false
+                    }
+                    if (state == Player.STATE_ENDED) {
+                        isPlayingState = false
+                    }
+                }
+                override fun onPlayerError(error: PlaybackException) {
+                    Log.w("ExoVideoPlayer", "Player error: [${error.errorCodeName}] ${error.message}")
+                    hasPlaybackError = true
+                    playbackErrorMessage = when (error.errorCode) {
+                        PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> "Server video menolak koneksi (HTTP 403/404)"
+                        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+                        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "Koneksi jaringan internet terputus atau timeout"
+                        PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+                        PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED -> "Format HLS manifest tidak valid"
+                        PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+                        PlaybackException.ERROR_CODE_DECODING_FAILED -> "Codec video perangkat tidak mendukung stream ini"
+                        else -> "Gagal memutar video: ${error.errorCodeName}"
+                    }
+                }
+            }
 
-        if (stream != null && stream.isDirect && useNativeExo) {
+            val instance = playerManager.initializePlayer(
+                customHeaders = stream.headers,
+                externalListener = listener
+            )
+            exoPlayer = instance
             playerManager.prepareStream(stream)
+        } else {
+            // Ensure any previous native player instance is released when in Web Player mode
+            playerManager.releasePlayer()
+            exoPlayer = null
         }
 
         onDispose {
@@ -230,14 +237,22 @@ fun ExoVideoPlayer(
             if (!useNativeExo || (resolvedStreamState != null && !resolvedStreamState!!.isDirect)) {
                 // Embedded Sandboxed Web Engine
                 WebPlayerView(
-                    url = resolvedStreamState?.originalIframeUrl ?: streamUrl,
+                    url = resolvedStreamState?.originalIframeUrl ?: activeStreamUrl,
                     title = title,
                     onBack = onBack,
                     onSwitchToExo = {
-                        useNativeExo = true
-                        resolvedStreamState?.let {
-                            if (it.isDirect) {
-                                playerManager.prepareStream(it)
+                        scope.launch {
+                            isResolving = true
+                            try {
+                                val freshResolved = StreamResolver.resolve(context, activeStreamUrl, currentServerName)
+                                resolvedStreamState = freshResolved
+                                if (freshResolved.isDirect) {
+                                    useNativeExo = true
+                                }
+                            } catch (e: Exception) {
+                                Log.e("ExoVideoPlayer", "Manual re-resolve failed", e)
+                            } finally {
+                                isResolving = false
                             }
                         }
                     },
@@ -427,20 +442,28 @@ fun ExoVideoPlayer(
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                                        .background(
+                                            Brush.verticalGradient(
+                                                listOf(Color.Black.copy(alpha = 0.85f), Color.Transparent)
+                                            )
+                                        )
+                                        .padding(horizontal = 14.dp, vertical = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     IconButton(
                                         onClick = onBack,
                                         modifier = Modifier
-                                            .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                                            .background(Color.White.copy(alpha = 0.15f), CircleShape)
+                                            .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
                                             .size(36.dp)
                                     ) {
                                         Icon(imageVector = Icons.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(20.dp))
                                     }
                                     Spacer(modifier = Modifier.width(10.dp))
+                                    
+                                    val formattedEpTitle = remember(title) { FormatUtils.formatEpisodeTitle(title) }
                                     Text(
-                                        text = title,
+                                        text = formattedEpTitle,
                                         color = Color.White,
                                         fontSize = 14.sp,
                                         fontWeight = FontWeight.Bold,
@@ -449,14 +472,15 @@ fun ExoVideoPlayer(
                                         modifier = Modifier.weight(1f)
                                     )
                                     
-                                    // Bitrate badge
+                                    // Quality / Speed Badge
                                     Box(
                                         modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(Color(0xFF1E293B))
-                                            .padding(horizontal = 6.dp, vertical = 3.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(Color.White.copy(alpha = 0.12f))
+                                            .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+                                            .padding(horizontal = 8.dp, vertical = 4.dp)
                                     ) {
-                                        Text(text = bandwidthSpeedText, color = Color(0xFF00F2FE), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                        Text(text = if (bandwidthSpeedText.isNotEmpty()) bandwidthSpeedText else "HD", color = Color(0xFF00F2FE), fontSize = 10.sp, fontWeight = FontWeight.Bold)
                                     }
 
                                     Spacer(modifier = Modifier.width(6.dp))
@@ -464,12 +488,13 @@ fun ExoVideoPlayer(
                                     // Switch to Web Engine
                                     Box(
                                         modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(Color(0xFF23283A))
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(Color.White.copy(alpha = 0.12f))
+                                            .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
                                             .clickable { useNativeExo = false }
                                             .padding(horizontal = 8.dp, vertical = 4.dp)
                                     ) {
-                                        Text("Web Player", color = Color(0xFF94A3B8), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                        Text("Web Player", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                                     }
 
                                     Spacer(modifier = Modifier.width(6.dp))
@@ -477,16 +502,18 @@ fun ExoVideoPlayer(
                                     IconButton(
                                         onClick = { showSettingsDialog = true },
                                         modifier = Modifier
-                                            .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                                            .background(Color.White.copy(alpha = 0.15f), CircleShape)
+                                            .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
                                             .size(36.dp)
                                     ) {
                                         Icon(imageVector = Icons.Filled.Settings, contentDescription = "Settings", tint = Color.White, modifier = Modifier.size(18.dp))
                                     }
-                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
                                     IconButton(
                                         onClick = { isLocked = true },
                                         modifier = Modifier
-                                            .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                                            .background(Color.White.copy(alpha = 0.15f), CircleShape)
+                                            .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
                                             .size(36.dp)
                                     ) {
                                         Icon(imageVector = Icons.Filled.LockOpen, contentDescription = "Lock", tint = Color.White, modifier = Modifier.size(18.dp))
@@ -497,8 +524,21 @@ fun ExoVideoPlayer(
                                 Row(
                                     modifier = Modifier.align(Alignment.CenterHorizontally),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(32.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(24.dp)
                                 ) {
+                                    // Previous Episode (if available)
+                                    if (totalEpisodes > 1 && currentEpisodeIndex > 0) {
+                                        IconButton(
+                                            onClick = { onEpisodeChange(currentEpisodeIndex - 1) },
+                                            modifier = Modifier
+                                                .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                                                .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
+                                                .size(38.dp)
+                                        ) {
+                                            Icon(imageVector = Icons.Filled.SkipPrevious, contentDescription = "Episode Sebelumnya", tint = Color.White, modifier = Modifier.size(22.dp))
+                                        }
+                                    }
+
                                     // Rewind 10s
                                     IconButton(
                                         onClick = {
@@ -509,12 +549,13 @@ fun ExoVideoPlayer(
                                         },
                                         modifier = Modifier
                                             .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                                            .size(44.dp)
+                                            .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
+                                            .size(46.dp)
                                     ) {
                                         Icon(imageVector = Icons.Filled.Replay10, contentDescription = "Rewind 10s", tint = Color.White, modifier = Modifier.size(26.dp))
                                     }
                                     
-                                    // Play / Pause
+                                    // Play / Pause (Modern Radiant Accent)
                                     IconButton(
                                         onClick = {
                                             exoPlayer?.let {
@@ -528,14 +569,20 @@ fun ExoVideoPlayer(
                                             }
                                         },
                                         modifier = Modifier
-                                            .background(Color(0xFF7000FF), CircleShape)
-                                            .size(56.dp)
+                                            .background(
+                                                Brush.radialGradient(
+                                                    listOf(Color(0xFFE50914), Color(0xFFB00610))
+                                                ),
+                                                CircleShape
+                                            )
+                                            .border(1.dp, Color.White.copy(alpha = 0.3f), CircleShape)
+                                            .size(60.dp)
                                     ) {
                                         Icon(
                                             imageVector = if (isPlayingState) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                                             contentDescription = "Play/Pause",
                                             tint = Color.White,
-                                            modifier = Modifier.size(32.dp)
+                                            modifier = Modifier.size(34.dp)
                                         )
                                     }
                                     
@@ -549,9 +596,23 @@ fun ExoVideoPlayer(
                                         },
                                         modifier = Modifier
                                             .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                                            .size(44.dp)
+                                            .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
+                                            .size(46.dp)
                                     ) {
                                         Icon(imageVector = Icons.Filled.Forward10, contentDescription = "Forward 10s", tint = Color.White, modifier = Modifier.size(26.dp))
+                                    }
+
+                                    // Next Episode (if available)
+                                    if (totalEpisodes > 1 && currentEpisodeIndex < totalEpisodes - 1) {
+                                        IconButton(
+                                            onClick = { onEpisodeChange(currentEpisodeIndex + 1) },
+                                            modifier = Modifier
+                                                .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                                                .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
+                                                .size(38.dp)
+                                        ) {
+                                            Icon(imageVector = Icons.Filled.SkipNext, contentDescription = "Episode Selanjutnya", tint = Color.White, modifier = Modifier.size(22.dp))
+                                        }
                                     }
                                 }
                                 
@@ -559,9 +620,14 @@ fun ExoVideoPlayer(
                                 Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                                        .background(
+                                            Brush.verticalGradient(
+                                                listOf(Color.Transparent, Color.Black.copy(alpha = 0.9f))
+                                            )
+                                        )
+                                        .padding(horizontal = 16.dp, vertical = 10.dp)
                                 ) {
-                                    // Slider
+                                    // Custom Sleek Slider
                                     Slider(
                                         value = if (duration > 0) (currentPosition.toFloat() / duration).coerceIn(0f, 1f) else 0f,
                                         onValueChange = { frac ->
@@ -572,9 +638,9 @@ fun ExoVideoPlayer(
                                             exoPlayer?.seekTo(currentPosition)
                                         },
                                         colors = SliderDefaults.colors(
-                                            thumbColor = Color(0xFF7000FF),
-                                            activeTrackColor = Color(0xFF7000FF),
-                                            inactiveTrackColor = Color.White.copy(alpha = 0.2f)
+                                            thumbColor = Color(0xFFE50914),
+                                            activeTrackColor = Color(0xFFE50914),
+                                            inactiveTrackColor = Color.White.copy(alpha = 0.25f)
                                         ),
                                         modifier = Modifier.fillMaxWidth().height(18.dp)
                                     )
@@ -592,36 +658,48 @@ fun ExoVideoPlayer(
                                         )
                                         
                                         Row(verticalAlignment = Alignment.CenterVertically) {
+                                            // Playback Speed quick pill
+                                            Box(
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(6.dp))
+                                                    .background(Color.White.copy(alpha = 0.12f))
+                                                    .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
+                                                    .clickable {
+                                                        playbackSpeed = when (playbackSpeed) {
+                                                            1.0f -> 1.25f
+                                                            1.25f -> 1.5f
+                                                            1.5f -> 2.0f
+                                                            2.0f -> 0.75f
+                                                            else -> 1.0f
+                                                        }
+                                                        exoPlayer?.setPlaybackSpeed(playbackSpeed)
+                                                    }
+                                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                                            ) {
+                                                Text(text = "${playbackSpeed}x", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                            }
+
+                                            Spacer(modifier = Modifier.width(8.dp))
+
                                             // Server selector
                                             Box(
                                                 modifier = Modifier
                                                     .clip(RoundedCornerShape(6.dp))
-                                                    .background(Color.Black.copy(alpha = 0.5f))
+                                                    .background(Color.White.copy(alpha = 0.12f))
+                                                    .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
                                                     .clickable { showServerSelector = true }
                                                     .padding(horizontal = 8.dp, vertical = 4.dp)
                                             ) {
-                                                Text(text = currentServerName, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Icon(imageVector = Icons.Filled.Dns, contentDescription = null, tint = Color(0xFFFFC107), modifier = Modifier.size(12.dp))
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Text(text = currentServerName, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                                }
                                             }
                                             
                                             Spacer(modifier = Modifier.width(8.dp))
                                             
-                                            // Fullscreen Toggle
-                                            IconButton(
-                                                onClick = { isFullscreen = !isFullscreen },
-                                                modifier = Modifier
-                                                    .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                                                    .size(32.dp)
-                                            ) {
-                                                Icon(
-                                                    imageVector = if (fullScreenMode) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
-                                                    contentDescription = "Fullscreen",
-                                                    tint = Color.White,
-                                                    modifier = Modifier.size(18.dp)
-                                                )
-                                            }
-                                            
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            
+                                            // Aspect Ratio Toggle
                                             IconButton(
                                                 onClick = {
                                                     resizeMode = when (resizeMode) {
@@ -631,7 +709,7 @@ fun ExoVideoPlayer(
                                                     }
                                                 },
                                                 modifier = Modifier
-                                                    .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                                                    .background(Color.White.copy(alpha = 0.12f), CircleShape)
                                                     .size(32.dp)
                                             ) {
                                                 Icon(
@@ -641,6 +719,23 @@ fun ExoVideoPlayer(
                                                         else -> Icons.Filled.AspectRatio
                                                     },
                                                     contentDescription = "Aspect",
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
+
+                                            Spacer(modifier = Modifier.width(6.dp))
+
+                                            // Fullscreen Toggle
+                                            IconButton(
+                                                onClick = { isFullscreen = !isFullscreen },
+                                                modifier = Modifier
+                                                    .background(Color.White.copy(alpha = 0.12f), CircleShape)
+                                                    .size(32.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (fullScreenMode) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                                                    contentDescription = "Fullscreen",
                                                     tint = Color.White,
                                                     modifier = Modifier.size(18.dp)
                                                 )
@@ -691,27 +786,30 @@ fun ExoVideoPlayer(
     if (showSettingsDialog) {
         AlertDialog(
             onDismissRequest = { showSettingsDialog = false },
-            containerColor = Color(0xFF131520),
+            containerColor = Color(0xFF161822),
             titleContentColor = Color.White,
             textContentColor = Color.White,
+            shape = RoundedCornerShape(16.dp),
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(imageVector = Icons.Filled.Settings, contentDescription = "Settings", tint = Color(0xFF7000FF))
+                    Icon(imageVector = Icons.Filled.Settings, contentDescription = "Settings", tint = Color(0xFFE50914))
                     Spacer(modifier = Modifier.width(12.dp))
                     Text("Pengaturan Putar", fontSize = 18.sp, fontWeight = FontWeight.Bold)
                 }
             },
             text = {
                 Column {
-                    Text("Kecepatan Putar", color = Color.Gray, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Text("Kecepatan Putar", color = Color(0xFF94A3B8), fontSize = 13.sp, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         listOf(0.5f, 1.0f, 1.25f, 1.5f, 2.0f).forEach { speed ->
+                            val isSelected = playbackSpeed == speed
                             Box(
                                 modifier = Modifier
                                     .weight(1f)
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(if (playbackSpeed == speed) Color(0xFF7000FF) else Color.Black.copy(alpha = 0.3f))
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (isSelected) Color(0xFFE50914) else Color(0xFF202330))
+                                    .border(1.dp, if (isSelected) Color(0xFFFF5252) else Color.Transparent, RoundedCornerShape(8.dp))
                                     .clickable {
                                         playbackSpeed = speed
                                         exoPlayer?.setPlaybackSpeed(speed)
@@ -726,15 +824,17 @@ fun ExoVideoPlayer(
                     
                     Spacer(modifier = Modifier.height(20.dp))
                     
-                    Text("Kualitas Resolusi (HLS Track Selection)", color = Color.Gray, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Text("Kualitas Resolusi (HLS Track Selection)", color = Color(0xFF94A3B8), fontSize = 13.sp, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         listOf("Auto", "360p", "480p", "720p", "1080p").forEach { res ->
+                            val isSelected = currentQuality == res
                             Box(
                                 modifier = Modifier
                                     .weight(1f)
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(if (currentQuality == res) Color(0xFF7000FF) else Color.Black.copy(alpha = 0.3f))
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (isSelected) Color(0xFFE50914) else Color(0xFF202330))
+                                    .border(1.dp, if (isSelected) Color(0xFFFF5252) else Color.Transparent, RoundedCornerShape(8.dp))
                                     .clickable {
                                         currentQuality = res
                                         playerManager.setVideoQuality(res)
@@ -752,9 +852,10 @@ fun ExoVideoPlayer(
             confirmButton = {
                 Button(
                     onClick = { showSettingsDialog = false },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7000FF))
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE50914)),
+                    shape = RoundedCornerShape(8.dp)
                 ) {
-                    Text("Selesai", color = Color.White)
+                    Text("Selesai", color = Color.White, fontWeight = FontWeight.Bold)
                 }
             }
         )
@@ -764,12 +865,13 @@ fun ExoVideoPlayer(
     if (showServerSelector) {
         AlertDialog(
             onDismissRequest = { showServerSelector = false },
-            containerColor = Color(0xFF131520),
+            containerColor = Color(0xFF161822),
             titleContentColor = Color.White,
             textContentColor = Color.White,
+            shape = RoundedCornerShape(16.dp),
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(imageVector = Icons.Filled.Dns, contentDescription = "Servers", tint = Color(0xFF7000FF))
+                    Icon(imageVector = Icons.Filled.Dns, contentDescription = "Servers", tint = Color(0xFFE50914))
                     Spacer(modifier = Modifier.width(12.dp))
                     Text("Pilih Server Putar", fontSize = 18.sp, fontWeight = FontWeight.Bold)
                 }
@@ -786,11 +888,12 @@ fun ExoVideoPlayer(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(8.dp))
-                                    .background(if (isSelected) Color(0xFF7000FF) else Color.Black.copy(alpha = 0.3f))
+                                    .background(if (isSelected) Color(0xFFE50914) else Color(0xFF202330))
+                                    .border(1.dp, if (isSelected) Color(0xFFFF5252) else Color.Transparent, RoundedCornerShape(8.dp))
                                     .clickable {
                                         currentServerName = embed.serverName
+                                        activeStreamUrl = embed.iframeUrl
                                         showServerSelector = false
-                                        onEpisodeChange(currentEpisodeIndex)
                                     }
                                     .padding(horizontal = 16.dp, vertical = 12.dp)
                             ) {
@@ -835,6 +938,7 @@ fun WebPlayerView(
         AndroidView(
             factory = { ctx ->
                 WebView(ctx).apply {
+                    setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                     layoutParams = ViewGroup.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT

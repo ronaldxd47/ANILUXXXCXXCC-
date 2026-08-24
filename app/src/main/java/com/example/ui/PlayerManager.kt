@@ -152,8 +152,11 @@ class PlayerManager private constructor(context: Context) {
             )
             .build()
 
-        // Step 3: Build ExoPlayer
-        val newPlayer = ExoPlayer.Builder(appContext)
+        // Step 3: Build ExoPlayer with decoder fallback for emulator compatibility
+        val renderersFactory = androidx.media3.exoplayer.DefaultRenderersFactory(appContext)
+            .setEnableDecoderFallback(true)
+
+        val newPlayer = ExoPlayer.Builder(appContext, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
             .setBandwidthMeter(bandwidthMeter)
