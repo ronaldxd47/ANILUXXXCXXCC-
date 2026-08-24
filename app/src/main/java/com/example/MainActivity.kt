@@ -146,8 +146,10 @@ class MainActivity : ComponentActivity() {
                         AnimatedContent(
                             targetState = activeScreen,
                             transitionSpec = {
-                                (slideInHorizontally(animationSpec = tween(300), initialOffsetX = { it }) + fadeIn(animationSpec = tween(300))) togetherWith
-                                    (slideOutHorizontally(animationSpec = tween(300), targetOffsetX = { -it }) + fadeOut(animationSpec = tween(300)))
+                                (fadeIn(animationSpec = tween(320, easing = FastOutSlowInEasing)) +
+                                    scaleIn(initialScale = 0.96f, animationSpec = tween(320, easing = FastOutSlowInEasing))) togetherWith
+                                    (fadeOut(animationSpec = tween(220, easing = FastOutLinearInEasing)) +
+                                        scaleOut(targetScale = 1.02f, animationSpec = tween(220, easing = FastOutLinearInEasing)))
                             },
                             label = "screen_transition"
                         ) { screen ->
@@ -220,51 +222,59 @@ fun TopBar(viewModel: AnimeViewModel, onSearchClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 24.dp, vertical = 20.dp),
+            .padding(horizontal = 20.dp, vertical = 14.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
-                .clip(RoundedCornerShape(12.dp))
+                .clip(RoundedCornerShape(16.dp))
+                .background(Color(0x22FFFFFF))
+                .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(16.dp))
                 .clickable { viewModel.navigateTo(Screen.Profile) }
-                .padding(vertical = 4.dp, horizontal = 4.dp)
+                .padding(horizontal = 10.dp, vertical = 6.dp)
         ) {
             Box(
                 modifier = Modifier
-                    .size(46.dp)
+                    .size(40.dp)
                     .clip(CircleShape)
                     .background(Brush.linearGradient(currentGrad))
-                    .border(2.dp, Color.White.copy(alpha = 0.4f), CircleShape),
+                    .border(1.5.dp, Color.White.copy(alpha = 0.6f), CircleShape),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Filled.Person,
                     contentDescription = "Avatar",
                     tint = Color.White,
-                    modifier = Modifier.size(26.dp)
+                    modifier = Modifier.size(22.dp)
                 )
             }
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(10.dp))
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Welcome", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+                    Text("Hai,", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp)
                     Spacer(modifier = Modifier.width(4.dp))
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
-                            .background(Color(0xFFFFB300).copy(alpha = 0.2f))
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(Color(0xFFFFB300), Color(0xFFFF7043))
+                                )
+                            )
                             .padding(horizontal = 5.dp, vertical = 1.dp)
                     ) {
-                        Text("VIP", color = Color(0xFFFFC107), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                        Text("VIP", color = Color.Black, fontSize = 9.sp, fontWeight = FontWeight.Black)
                     }
                 }
                 Text(
-                    text = "$currentName 💭", 
+                    text = currentName, 
                     color = Color.White, 
-                    fontSize = 17.sp, 
-                    fontWeight = FontWeight.Bold
+                    fontSize = 15.sp, 
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }
@@ -282,9 +292,10 @@ fun TopBar(viewModel: AnimeViewModel, onSearchClick: () -> Unit) {
             )
             Box(
                 modifier = Modifier
-                    .size(38.dp)
+                    .size(42.dp)
                     .clip(CircleShape)
-                    .background(Color(0x22FFFFFF))
+                    .background(Color(0x28FFFFFF))
+                    .border(1.dp, Color(0x3300F2FE), CircleShape)
                     .clickable { viewModel.refreshData() },
                 contentAlignment = Alignment.Center
             ) {
@@ -297,19 +308,20 @@ fun TopBar(viewModel: AnimeViewModel, onSearchClick: () -> Unit) {
                         .then(if (isRefreshing) Modifier.rotate(angle) else Modifier)
                 )
             }
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(10.dp))
             Box(
                 modifier = Modifier
-                    .size(38.dp)
+                    .size(42.dp)
                     .clip(CircleShape)
-                    .background(Color(0x22FFFFFF))
+                    .background(Color(0x28FFFFFF))
+                    .border(1.dp, Color(0x33FF2A55), CircleShape)
                     .clickable { onSearchClick() },
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Filled.Search,
                     contentDescription = "Search",
-                    tint = Color(0xFFFF5252),
+                    tint = Color(0xFFFF3366),
                     modifier = Modifier.size(20.dp)
                 )
             }
@@ -414,33 +426,43 @@ fun HeroCarousel(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 12.dp),
+                .padding(horizontal = 20.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                imageVector = Icons.Filled.Whatshot,
-                contentDescription = null,
-                tint = Color(0xFFE53935),
-                modifier = Modifier.size(22.dp)
-            )
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .background(Color(0x33FF2A55)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Whatshot,
+                    contentDescription = null,
+                    tint = Color(0xFFFF2A55),
+                    modifier = Modifier.size(18.dp)
+                )
+            }
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "Trending Now",
+                text = "Trending Pekan Ini",
                 color = Color.White,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold
+                fontSize = 19.sp,
+                fontWeight = FontWeight.Black
             )
             Spacer(modifier = Modifier.weight(1f))
             Box(
                 modifier = Modifier
-                    .background(Color(0xFFE53935).copy(alpha = 0.1f), androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Brush.horizontalGradient(listOf(Color(0x33FF2A55), Color(0x337000FF))))
+                    .border(1.dp, Color(0x66FF2A55), RoundedCornerShape(20.dp))
                     .padding(horizontal = 10.dp, vertical = 4.dp)
             ) {
                 Text(
-                    text = "MOST POPULAR",
-                    color = Color(0xFFE53935),
+                    text = "HOT 🔥",
+                    color = Color(0xFFFF5252),
                     fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.ExtraBold
                 )
             }
         }
@@ -450,15 +472,29 @@ fun HeroCarousel(
         HorizontalPager(
             state = pagerState,
             modifier = Modifier.fillMaxWidth(),
-            contentPadding = PaddingValues(horizontal = 24.dp),
-            pageSpacing = 16.dp
+            contentPadding = PaddingValues(horizontal = 20.dp),
+            pageSpacing = 14.dp
         ) { page ->
             val anime = trendingAnime[page]
+            val pageOffset = ((pagerState.currentPage - page) + pagerState.currentPageOffsetFraction)
+            val scale = 1f - (kotlin.math.abs(pageOffset) * 0.05f).coerceIn(0f, 1f)
+
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(250.dp)
-                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(24.dp))
+                    .height(240.dp)
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                    }
+                    .clip(RoundedCornerShape(22.dp))
+                    .border(
+                        1.dp,
+                        Brush.verticalGradient(
+                            listOf(Color.White.copy(alpha = 0.2f), Color.Transparent)
+                        ),
+                        RoundedCornerShape(22.dp)
+                    )
                     .clickable { onAnimeClick(anime) }
             ) {
                 ResolveAnimeImage(
@@ -468,14 +504,16 @@ fun HeroCarousel(
                     contentScale = ContentScale.Crop
                 )
                 
-                // Gradient overlay
+                // Cinematic dynamic gradient overlay
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(
                             Brush.verticalGradient(
-                                0.3f to Color.Transparent,
-                                1.0f to Color(0xFF040404).copy(alpha = 0.95f)
+                                0.0f to Color.Transparent,
+                                0.35f to Color(0x33000000),
+                                0.7f to Color(0xCC04060A),
+                                1.0f to Color(0xF704060A)
                             )
                         )
                 )
@@ -484,111 +522,156 @@ fun HeroCarousel(
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopStart)
-                        .padding(16.dp)
+                        .padding(14.dp)
+                        .clip(RoundedCornerShape(8.dp))
                         .background(
                             Brush.horizontalGradient(
-                                listOf(Color(0xFFE53935), Color(0xFFFF5252))
-                            ),
-                            androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                                listOf(Color(0xFFFF2A55), Color(0xFFFF6B00))
+                            )
                         )
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .padding(horizontal = 9.dp, vertical = 4.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.TrendingUp,
                             contentDescription = null,
                             tint = Color.White,
-                            modifier = Modifier.size(14.dp)
+                            modifier = Modifier.size(13.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "#${page + 1}",
+                            text = "TOP #${page + 1}",
                             color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Black
                         )
                     }
                 }
 
-                // Text content at bottom
-                Column(
+                // Text & Play Button content at bottom
+                Row(
                     modifier = Modifier
                         .align(Alignment.BottomStart)
-                        .padding(16.dp)
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Bottom
                 ) {
-                    Text(
-                        text = anime.title,
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 20.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        val viewsValue = viewModel.getViewCount(anime.link)
-                        val viewsText = viewModel.formatViewCount(viewsValue)
-
-                        Icon(
-                            imageVector = Icons.Filled.Whatshot,
-                            contentDescription = "Rating",
-                            tint = Color(0xFFFFB300),
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = viewsText,
-                            color = Color(0xFFFFB300),
+                            text = anime.title,
+                            color = Color.White,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp
+                            fontSize = 18.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                        
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(text = "•", color = Color.Gray, fontSize = 14.sp)
-                        Spacer(modifier = Modifier.width(12.dp))
-                        
-                        Box(
-                            modifier = Modifier
-                                .background(Color(0xFF2E7D32).copy(alpha = 0.2f), androidx.compose.foundation.shape.RoundedCornerShape(6.dp))
-                                .border(1.dp, Color(0xFF2E7D32).copy(alpha = 0.5f), androidx.compose.foundation.shape.RoundedCornerShape(6.dp))
-                                .padding(horizontal = 8.dp, vertical = 2.dp)
-                        ) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            val viewsValue = viewModel.getViewCount(anime.link)
+                            val viewsText = viewModel.formatViewCount(viewsValue)
+
+                            Icon(
+                                imageVector = Icons.Filled.Whatshot,
+                                contentDescription = "Rating",
+                                tint = Color(0xFFFFB300),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text(
+                                text = viewsText,
+                                color = Color(0xFFFFB300),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                            
+                            Spacer(modifier = Modifier.width(8.dp))
+                            
                             val isDonghua = anime.link.contains("anichin") || anime.link.contains("donghub")
-                            val textLabel = if (isDonghua) "DONGHUA" else "ANIME"
-                            Text(text = textLabel, color = Color(0xFF4CAF50), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(if (isDonghua) Color(0xFF7000FF).copy(alpha = 0.3f) else Color(0xFFFF2A55).copy(alpha = 0.3f))
+                                    .border(0.5.dp, if (isDonghua) Color(0xFF7000FF) else Color(0xFFFF2A55), RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = if (isDonghua) "3D DONGHUA" else "ANIME JP",
+                                    color = if (isDonghua) Color(0xFFD4B0FF) else Color(0xFFFF8FA3),
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = anime.status.ifEmpty { "ONGOING" },
+                                color = Color(0xFF00F2FE),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
                         }
-                        
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(text = "• ${anime.status.ifEmpty { "ONGOING" }}", color = Color.LightGray, fontSize = 12.sp)
                     }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Populer saat ini • Nikmati kisah aksi dan visual terbaik favorit pemirsa.",
-                        color = Color.LightGray,
-                        fontSize = 13.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    // Floating Glass Play Pill
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(Color(0xFFFF2A55), Color(0xFFFF5252))
+                                )
+                            )
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Filled.PlayArrow,
+                                contentDescription = "Play",
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Nonton",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
                 }
             }
         }
         
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(12.dp))
         
-        // Pager indicator
+        // Fluid Animated Pager indicator
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Center
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
         ) {
             repeat(pagerState.pageCount) { iteration ->
-                val color = if (pagerState.currentPage == iteration) Color(0xFFE53935) else Color(0xFF333333)
-                val width = if (pagerState.currentPage == iteration) 16.dp else 8.dp
+                val isSelected = pagerState.currentPage == iteration
+                val width by animateDpAsState(
+                    targetValue = if (isSelected) 22.dp else 6.dp,
+                    animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+                    label = "indicator_width"
+                )
+                val color by animateColorAsState(
+                    targetValue = if (isSelected) Color(0xFFFF2A55) else Color(0x33FFFFFF),
+                    label = "indicator_color"
+                )
                 Box(
                     modifier = Modifier
                         .padding(horizontal = 3.dp)
-                        .height(6.dp)
+                        .height(5.dp)
                         .width(width)
-                        .clip(androidx.compose.foundation.shape.CircleShape)
+                        .clip(CircleShape)
                         .background(color)
                 )
             }
@@ -598,61 +681,135 @@ fun HeroCarousel(
 
 @Composable
 fun AnnouncementSection() {
-    Column(modifier = Modifier.padding(horizontal = 24.dp)) {
-        Text(
-            text = "Pengumuman",
-            color = Color.White,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Medium
-        )
-        Spacer(modifier = Modifier.height(12.dp))
+    Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(24.dp)
+                    .clip(CircleShape)
+                    .background(Color(0x33FFB300)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Notifications,
+                    contentDescription = null,
+                    tint = Color(0xFFFFC107),
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "Pemberitahuan",
+                color = Color.White,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Spacer(modifier = Modifier.height(10.dp))
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .redGlass(
-                    backgroundColor = Color(0x3B1A0202),
-                    borderColor = Color(0x52E53935)
+                .clip(RoundedCornerShape(16.dp))
+                .background(
+                    Brush.horizontalGradient(
+                        listOf(Color(0x3B250810), Color(0x3B100620))
+                    )
                 )
-                .padding(16.dp)
+                .border(
+                    1.dp,
+                    Brush.horizontalGradient(
+                        listOf(Color(0x66FF2A55), Color(0x667000FF))
+                    ),
+                    RoundedCornerShape(16.dp)
+                )
+                .padding(14.dp)
         ) {
-            Text(
-                text = "Kami berupaya memberikan yang terbaik untuk Anda.\nTerimakasih atas dukungan nya \uD83D\uDE04",
-                color = Color.White.copy(alpha = 0.9f),
-                fontSize = 14.sp,
-                lineHeight = 22.sp
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "📢",
+                    fontSize = 20.sp,
+                    modifier = Modifier.padding(end = 12.dp)
+                )
+                Text(
+                    text = "Streaming lancar & update tercepat setiap hari. Selamat menonton! ✨",
+                    color = Color.White.copy(alpha = 0.92f),
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
         }
     }
 }
 
 @Composable
 fun GenresSection(onGenreClick: (String) -> Unit) {
-    val genres = listOf("Donghua", "Anime", "Movie", "Action", "Romance")
+    val genres = listOf(
+        "🔥 Semua", 
+        "⚔️ 3D Donghua", 
+        "🇯🇵 Anime", 
+        "⚡ Aksi", 
+        "🌸 Romantis", 
+        "✨ Isekai", 
+        "🥋 Kultivasi", 
+        "🎬 Movie"
+    )
     Column {
-        Text(
-            text = "Semua Genre",
-            color = Color.White,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier.padding(horizontal = 24.dp)
-        )
-        Spacer(modifier = Modifier.height(12.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Eksplor Kategori",
+                color = Color.White,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Spacer(modifier = Modifier.height(10.dp))
         androidx.compose.foundation.lazy.LazyRow(
-            contentPadding = PaddingValues(horizontal = 24.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            contentPadding = PaddingValues(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             items(genres, key = { it }) { genre ->
+                var isPressed by remember { mutableStateOf(false) }
+                val scale by animateFloatAsState(
+                    targetValue = if (isPressed) 0.92f else 1.0f,
+                    animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+                    label = "genre_scale"
+                )
+                val cleanGenre = genre.replace(Regex("[^a-zA-Z0-9 ]"), "").trim()
                 Box(
                     modifier = Modifier
-                        .redGlass(
-                            backgroundColor = Color(0x2B1E0303),
-                            borderColor = Color(0x3BFF3355),
-                            shape = RoundedCornerShape(12.dp)
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                        }
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color(0x22FFFFFF))
+                        .border(
+                            1.dp,
+                            Brush.horizontalGradient(
+                                listOf(Color(0x44FF2A55), Color(0x2200F2FE))
+                            ),
+                            RoundedCornerShape(14.dp)
                         )
-                        .clickable { onGenreClick(genre) }
-                        .padding(horizontal = 20.dp, vertical = 12.dp)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = LocalIndication.current
+                        ) {
+                            onGenreClick(if (cleanGenre.equals("Semua", ignoreCase = true)) "" else cleanGenre)
+                        }
+                        .padding(horizontal = 16.dp, vertical = 10.dp)
                 ) {
-                    Text(text = genre, color = Color(0xFFFF5252), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        text = genre,
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
             }
         }
@@ -661,9 +818,20 @@ fun GenresSection(onGenreClick: (String) -> Unit) {
 
 @Composable
 fun CompactAnimeCard(anime: ScrapedAnime, onClick: () -> Unit) {
+    var isPressed by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.94f else 1.0f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+        label = "card_scale"
+    )
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = LocalIndication.current,
@@ -674,7 +842,17 @@ fun CompactAnimeCard(anime: ScrapedAnime, onClick: () -> Unit) {
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(0.7f)
-                .clip(RoundedCornerShape(12.dp))
+                .clip(RoundedCornerShape(16.dp))
+                .background(Color(0xFF141824))
+                .border(
+                    BorderStroke(
+                        1.dp,
+                        Brush.verticalGradient(
+                            listOf(Color.White.copy(alpha = 0.18f), Color.White.copy(alpha = 0.03f))
+                        )
+                    ),
+                    shape = RoundedCornerShape(16.dp)
+                )
         ) {
             ResolveAnimeImage(
                 url = anime.imageUrl,
@@ -682,81 +860,99 @@ fun CompactAnimeCard(anime: ScrapedAnime, onClick: () -> Unit) {
                 contentScale = ContentScale.Crop
             )
 
-            // Gradient Overlay for bottom text
+            // Dynamic cinematic gradient overlay
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(
                         Brush.verticalGradient(
-                            0.5f to Color.Transparent,
-                            1.0f to Color.Black.copy(alpha = 0.9f)
+                            0.0f to Color.Transparent,
+                            0.45f to Color.Transparent,
+                            0.75f to Color(0xAA080B12),
+                            1.0f to Color(0xF5080B12)
                         )
                     )
             )
 
-            // 'New' Badge
+            // Top Badges Row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val isDonghua = anime.link.contains("anichin") || anime.link.contains("donghub") || anime.type == "Donghua"
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(
+                            if (isDonghua) Brush.horizontalGradient(listOf(Color(0xFF7000FF), Color(0xFF9D4EDD)))
+                            else Brush.horizontalGradient(listOf(Color(0xFFFF2A55), Color(0xFFFF6B00)))
+                        )
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = if (isDonghua) "3D" else "ANIME",
+                        color = Color.White,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Black
+                    )
+                }
+
+                // Score Badge with glass pill
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color.Black.copy(alpha = 0.7f))
+                        .border(0.5.dp, Color(0x88FFC107), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 5.dp, vertical = 2.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Filled.Star,
+                            contentDescription = "Score",
+                            tint = Color(0xFFFFC107),
+                            modifier = Modifier.size(10.dp)
+                        )
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Text(
+                            text = if (anime.score.isNotEmpty()) anime.score else "7.8",
+                            color = Color(0xFFFFE082),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            // Bottom Episode pill
             Box(
                 modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .background(
-                        color = Color(0xFFFF5722),
-                        shape = RoundedCornerShape(topStart = 12.dp, bottomEnd = 12.dp)
-                    )
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .align(Alignment.BottomStart)
+                    .padding(8.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xD90D1017))
+                    .border(0.5.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 6.dp, vertical = 3.dp)
             ) {
                 Text(
-                    text = "New",
-                    color = Color.White,
+                    text = if (anime.episode.isNotEmpty()) anime.episode else "Sub Indo",
+                    color = Color(0xFF00F2FE),
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
-
-            // Score Badge
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(4.dp)
-                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 4.dp, vertical = 2.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Filled.Star,
-                        contentDescription = "Score",
-                        tint = Color(0xFFFFC107),
-                        modifier = Modifier.size(10.dp)
-                    )
-                    Spacer(modifier = Modifier.width(2.dp))
-                    Text(
-                        text = if (anime.score.isNotEmpty()) anime.score else "7.00",
-                        color = Color.White,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-
-            // Episode text
-            Text(
-                text = if (anime.episode.isNotEmpty()) anime.episode else "1 Eps",
-                color = Color.White,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(8.dp)
-            )
         }
         
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(7.dp))
         
         Text(
             text = anime.title,
-            color = Color.White.copy(alpha = 0.9f),
-            fontWeight = FontWeight.Medium,
-            fontSize = 12.sp,
-            lineHeight = 16.sp,
+            color = Color.White,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 13.sp,
+            lineHeight = 17.sp,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
@@ -767,13 +963,13 @@ fun CompactAnimeCard(anime: ScrapedAnime, onClick: () -> Unit) {
 fun AnimeGridSection(animes: List<ScrapedAnime>, onAnimeClick: (ScrapedAnime) -> Unit) {
     val chunkedList = animes.chunked(3)
     Column(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         chunkedList.forEach { rowItems ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 rowItems.forEach { anime ->
                     Box(modifier = Modifier.weight(1f)) {
@@ -793,19 +989,19 @@ fun RekomendasiFantasySection(animes: List<ScrapedAnime>, onAnimeClick: (Scraped
     if (animes.isEmpty()) return
     Column {
         Text(
-            text = "Rekomendasi Fantasy Untukmu",
+            text = "Rekomendasi Pilihan",
             color = Color.White,
             fontSize = 18.sp,
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier.padding(horizontal = 24.dp)
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(horizontal = 20.dp)
         )
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
         androidx.compose.foundation.lazy.LazyRow(
-            contentPadding = PaddingValues(horizontal = 24.dp),
+            contentPadding = PaddingValues(horizontal = 20.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             items(animes, key = { it.title + it.link }) { anime ->
-                Box(modifier = Modifier.width(110.dp)) {
+                Box(modifier = Modifier.width(115.dp)) {
                     CompactAnimeCard(anime = anime, onClick = { onAnimeClick(anime) })
                 }
             }
@@ -820,33 +1016,57 @@ fun ContinueWatchingSection(latestAnime: List<ScrapedAnime>, onAnimeClick: (Scra
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 24.dp)
+                .padding(horizontal = 20.dp)
                 .clickable { onHistoryClick() },
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "Lanjutkan Nonton",
-                color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Medium
-            )
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(text = "History", color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp)
-                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = Color.White.copy(alpha = 0.8f), modifier = Modifier.size(16.dp))
+                Box(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clip(CircleShape)
+                        .background(Color(0x3300F2FE)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.PlayArrow,
+                        contentDescription = null,
+                        tint = Color(0xFF00F2FE),
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Lanjutkan Nonton",
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(text = "Semua Riwayat", color = Color(0xFF00F2FE), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = Color(0xFF00F2FE), modifier = Modifier.size(16.dp))
             }
         }
         Spacer(modifier = Modifier.height(12.dp))
         androidx.compose.foundation.lazy.LazyRow(
-            contentPadding = PaddingValues(horizontal = 24.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
+            contentPadding = PaddingValues(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             items(latestAnime, key = { it.title + it.link }) { anime ->
                 Box(
                     modifier = Modifier
                         .width(220.dp)
-                        .height(140.dp)
-                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+                        .height(130.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .border(
+                            1.dp,
+                            Brush.verticalGradient(
+                                listOf(Color.White.copy(alpha = 0.15f), Color.Transparent)
+                            ),
+                            RoundedCornerShape(16.dp)
+                        )
                         .clickable { onAnimeClick(anime) }
                 ) {
                     ResolveAnimeImage(
@@ -860,27 +1080,45 @@ fun ContinueWatchingSection(latestAnime: List<ScrapedAnime>, onAnimeClick: (Scra
                             .fillMaxSize()
                             .background(
                                 Brush.verticalGradient(
-                                    0.4f to Color.Transparent,
-                                    1.0f to Color.Black.copy(alpha = 0.9f)
+                                    0.2f to Color.Transparent,
+                                    1.0f to Color.Black.copy(alpha = 0.92f)
                                 )
                             )
                     )
+                    // Floating Center Play Button
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.5f))
+                            .border(1.dp, Color.White.copy(alpha = 0.6f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.PlayArrow,
+                            contentDescription = "Play",
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
                     Column(
                         modifier = Modifier
                             .align(Alignment.BottomStart)
-                            .padding(12.dp)
+                            .padding(10.dp)
                     ) {
                         Text(
-                            text = "Latest Episode", 
-                            color = Color.White.copy(alpha = 0.9f),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium
+                            text = if (anime.episode.isNotEmpty()) anime.episode else "Lanjut episode", 
+                            color = Color(0xFF00F2FE),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
                         )
-                        Spacer(modifier = Modifier.height(4.dp))
+                        Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = anime.title,
                             color = Color.White,
-                            fontSize = 14.sp,
+                            fontSize = 13.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -1004,38 +1242,69 @@ fun HomeScreen(viewModel: AnimeViewModel) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 24.dp)
+                        .padding(horizontal = 20.dp)
                         .padding(bottom = 12.dp)
                 ) {
-                    Text(
-                        text = "Rilis Terbaru",
-                        color = Color.White,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Rilis Terbaru",
+                            color = Color.White,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "${filteredData.size} Judul",
+                            color = Color(0xFF00F2FE),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
 
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
 
                     // Filter Chips Kategori: Semua, Anime, Donghua
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(Color(0x1AFFFFFF))
+                            .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp))
+                            .padding(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         listOf(
-                            "ALL" to "Semua",
+                            "ALL" to "🔥 Semua",
                             "ANIME" to "🇯🇵 Anime",
-                            "DONGHUA" to "🇨🇳 Donghua"
+                            "DONGHUA" to "🇨🇳 3D Donghua"
                         ).forEach { (key, label) ->
                             val isSelected = selectedCategoryFilter == key
+                            val bgBrush = if (isSelected) {
+                                Brush.horizontalGradient(
+                                    listOf(Color(0xFFFF2A55), Color(0xFFFF5252))
+                                )
+                            } else {
+                                Brush.horizontalGradient(
+                                    listOf(Color.Transparent, Color.Transparent)
+                                )
+                            }
                             Box(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(20.dp))
-                                    .background(if (isSelected) Color(0xFFE53935) else Color(0x33FFFFFF))
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(bgBrush)
                                     .clickable { selectedCategoryFilter = key }
-                                    .padding(horizontal = 14.dp, vertical = 6.dp)
+                                    .padding(vertical = 8.dp),
+                                contentAlignment = Alignment.Center
                             ) {
                                 Text(
                                     text = label,
-                                    color = if (isSelected) Color.White else Color.LightGray,
+                                    color = if (isSelected) Color.White else Color.White.copy(alpha = 0.6f),
                                     fontSize = 12.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                    fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
                                 )
                             }
                         }
@@ -1354,9 +1623,20 @@ fun HorizontalAnimeRow(
 
 @Composable
 fun AnimePosterCard(anime: ScrapedAnime, onClick: () -> Unit) {
+    var isPressed by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.93f else 1.0f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+        label = "poster_scale"
+    )
+
     Column(
         modifier = Modifier
             .width(140.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = LocalIndication.current,
@@ -1367,14 +1647,32 @@ fun AnimePosterCard(anime: ScrapedAnime, onClick: () -> Unit) {
             modifier = Modifier
                 .fillMaxWidth()
                 .height(200.dp)
-                .clip(RoundedCornerShape(12.dp)),
+                .clip(RoundedCornerShape(16.dp)),
             color = Color(0xFF16161E),
-            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.05f))
+            border = BorderStroke(
+                1.dp,
+                Brush.verticalGradient(
+                    listOf(Color.White.copy(alpha = 0.15f), Color.White.copy(alpha = 0.02f))
+                )
+            )
         ) {
             Box {
                 ResolveAnimeImage(
                     url = anime.imageUrl,
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+
+                // Bottom Shadow Overlay
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                0.5f to Color.Transparent,
+                                1.0f to Color.Black.copy(alpha = 0.85f)
+                            )
+                        )
                 )
 
                 if (anime.episode.isNotEmpty()) {
@@ -1382,13 +1680,18 @@ fun AnimePosterCard(anime: ScrapedAnime, onClick: () -> Unit) {
                         modifier = Modifier
                             .align(Alignment.BottomStart)
                             .padding(8.dp)
-                            .background(Color(0xFFE50914), RoundedCornerShape(4.dp))
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(Color(0xFFFF2A55), Color(0xFFFF5252))
+                                )
+                            )
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
                         Text(
                             text = anime.episode,
                             color = Color.White,
-                            fontSize = 11.sp,
+                            fontSize = 10.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -1399,7 +1702,9 @@ fun AnimePosterCard(anime: ScrapedAnime, onClick: () -> Unit) {
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(8.dp)
-                            .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(4.dp))
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color.Black.copy(alpha = 0.75f))
+                            .border(0.5.dp, Color(0x88FFC107), RoundedCornerShape(6.dp))
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1412,7 +1717,7 @@ fun AnimePosterCard(anime: ScrapedAnime, onClick: () -> Unit) {
                             Spacer(modifier = Modifier.width(2.dp))
                             Text(
                                 text = anime.score,
-                                color = Color.White,
+                                color = Color(0xFFFFE082),
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -1426,8 +1731,8 @@ fun AnimePosterCard(anime: ScrapedAnime, onClick: () -> Unit) {
             text = anime.title,
             color = Color.White,
             fontWeight = FontWeight.SemiBold,
-            fontSize = 14.sp,
-            maxLines = 1,
+            fontSize = 13.sp,
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
     }
@@ -4442,50 +4747,68 @@ fun AnimeBottomNavigation(viewModel: AnimeViewModel) {
     
     val items = listOf(
         Triple(Screen.Home, "Home", Icons.Outlined.Home),
-        Triple(Screen.Schedule, "Schedule", Icons.Outlined.DateRange),
-        Triple(Screen.Catalog, "Catalog", Icons.AutoMirrored.Filled.List),
-        Triple(Screen.Library, "Library", Icons.Outlined.BookmarkBorder),
-        Triple(Screen.Profile, "Profile", Icons.Outlined.Person) 
+        Triple(Screen.Schedule, "Jadwal", Icons.Outlined.DateRange),
+        Triple(Screen.Catalog, "Katalog", Icons.AutoMirrored.Filled.List),
+        Triple(Screen.Library, "Koleksi", Icons.Outlined.BookmarkBorder),
+        Triple(Screen.Profile, "Profil", Icons.Outlined.Person) 
     )
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
-            .background(Color(0xEE121520))
+            .navigationBarsPadding()
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(26.dp))
+            .background(Color(0xE610131E))
             .border(
                 BorderStroke(
                     1.dp,
-                    Brush.verticalGradient(
-                        listOf(Color(0x737000FF), Color(0x137000FF))
+                    Brush.horizontalGradient(
+                        listOf(Color(0x55FF2A55), Color(0x3300F2FE))
                     )
                 ),
-                shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+                shape = RoundedCornerShape(26.dp)
             )
-            .navigationBarsPadding(),
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 12.dp),
+                .padding(horizontal = 8.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.SpaceAround,
             verticalAlignment = Alignment.CenterVertically
         ) {
             items.forEach { (screen, label, icon) ->
                 val isSelected = when (label) {
                     "Home" -> activeScreen == Screen.Home || activeScreen == Screen.Detail || activeScreen == Screen.Episode
-                    "Schedule" -> activeScreen == Screen.Schedule
-                    "Catalog" -> activeScreen == Screen.Catalog || activeScreen == Screen.Search
-                    "Library" -> activeScreen == Screen.Library || activeScreen == Screen.MyList
-                    "Profile" -> activeScreen == Screen.Profile
+                    "Jadwal" -> activeScreen == Screen.Schedule
+                    "Katalog" -> activeScreen == Screen.Catalog || activeScreen == Screen.Search
+                    "Koleksi" -> activeScreen == Screen.Library || activeScreen == Screen.MyList
+                    "Profil" -> activeScreen == Screen.Profile
                     else -> false
                 }
 
-                val tint = if (isSelected) Color(0xFF00F2FE) else Color(0xFF94A3B8)
+                val iconScale by animateFloatAsState(
+                    targetValue = if (isSelected) 1.15f else 1.0f,
+                    animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+                    label = "nav_icon_scale"
+                )
 
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
+                val pillBg = if (isSelected) {
+                    Brush.horizontalGradient(
+                        listOf(Color(0x33FF2A55), Color(0x337000FF))
+                    )
+                } else {
+                    Brush.horizontalGradient(
+                        listOf(Color.Transparent, Color.Transparent)
+                    )
+                }
+
+                val tint = if (isSelected) Color(0xFFFF2A55) else Color(0xFF8E99AC)
+
+                Box(
                     modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(pillBg)
                         .clickable(
                             interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                             indication = null,
@@ -4493,31 +4816,31 @@ fun AnimeBottomNavigation(viewModel: AnimeViewModel) {
                                 viewModel.navigateTo(screen) 
                             }
                         )
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    if (isSelected) {
-                        Box(
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = label,
+                            tint = tint,
                             modifier = Modifier
-                                .size(6.dp)
-                                .clip(androidx.compose.foundation.shape.CircleShape)
-                                .background(Color(0xFF7000FF))
+                                .size(22.dp)
+                                .graphicsLayer {
+                                    scaleX = iconScale
+                                    scaleY = iconScale
+                                }
                         )
-                        Spacer(modifier = Modifier.height(3.dp))
-                    } else {
-                        Spacer(modifier = Modifier.height(9.dp))
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = label, 
+                            color = tint, 
+                            fontSize = 10.sp, 
+                            fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                        )
                     }
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = label,
-                        tint = tint,
-                        modifier = Modifier.size(24.dp)
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = label, 
-                        color = tint, 
-                        fontSize = 11.sp, 
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                    )
                 }
             }
         }

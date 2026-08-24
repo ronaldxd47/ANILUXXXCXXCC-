@@ -54,6 +54,9 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.example.data.StreamEmbed
+import com.example.data.stream.ResolvedStream
+import com.example.data.stream.StreamMediaType
+import com.example.data.stream.StreamResolver
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Formatter
@@ -74,11 +77,13 @@ fun ExoVideoPlayer(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     
-    // Playback Engine Mode: True = Native ExoPlayer, False = Embedded Web Player Sandbox
+    // Playback Engine Mode: True = Native ExoPlayer (HLS/MP4), False = Embedded Web Player Sandbox
     var useNativeExo by remember(streamUrl) { mutableStateOf(true) }
-    var resolvedUrl by remember(streamUrl) { mutableStateOf("") }
+    var resolvedStreamState by remember(streamUrl) { mutableStateOf<ResolvedStream?>(null) }
     var isResolving by remember(streamUrl) { mutableStateOf(true) }
     var resolveErrorMessage by remember(streamUrl) { mutableStateOf<String?>(null) }
+    var hasPlaybackError by remember(streamUrl) { mutableStateOf(false) }
+    var playbackErrorMessage by remember(streamUrl) { mutableStateOf("") }
     
     // Auto-selected server name
     var currentServerName by remember(streamUrl) {
@@ -90,24 +95,25 @@ fun ExoVideoPlayer(
     val playerManager = remember(context) { PlayerManager.getInstance(context) }
     var exoPlayer by remember { mutableStateOf<ExoPlayer?>(null) }
 
-    // Resolve direct streaming URL from embed iframe
+    // Resolve direct streaming URL with full header preservation and MIME classification
     LaunchedEffect(streamUrl) {
         isResolving = true
         resolveErrorMessage = null
+        hasPlaybackError = false
+        playbackErrorMessage = ""
         useNativeExo = true
         
         try {
-            val directUrl = VideoUrlResolver.resolve(context, streamUrl)
-            if (directUrl.isNotEmpty()) {
-                resolvedUrl = directUrl
+            val resolved = StreamResolver.resolve(context, streamUrl, currentServerName)
+            resolvedStreamState = resolved
+            if (resolved.isDirect) {
                 useNativeExo = true
             } else {
-                // If direct video stream not extractable, switch seamlessly to Web Player Engine
-                resolvedUrl = ""
+                // If stream cannot be resolved to direct media, use the Web Player Engine sandbox
                 useNativeExo = false
             }
         } catch (e: Exception) {
-            resolvedUrl = ""
+            Log.e("ExoVideoPlayer", "Stream resolution failed", e)
             useNativeExo = false
         } finally {
             isResolving = false
@@ -125,7 +131,7 @@ fun ExoVideoPlayer(
     var showControls by remember { mutableStateOf(true) }
     var isLocked by remember { mutableStateOf(false) }
     var resizeMode by remember { mutableStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
-    var currentQuality by remember { mutableStateOf("720p") }
+    var currentQuality by remember { mutableStateOf("Auto") }
     var playbackSpeed by remember { mutableStateOf(1.0f) }
     var isFullscreen by remember { mutableStateOf(false) }
     
@@ -133,12 +139,13 @@ fun ExoVideoPlayer(
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showServerSelector by remember { mutableStateOf(false) }
     
-    // Gestures
+    // Gestures & Live Bitrate
     var gestureSeekPreview by remember { mutableStateOf(-1L) }
-    var bufferingSpeedText by remember { mutableStateOf("8.5 Mbps") }
+    var bandwidthSpeedText by remember { mutableStateOf("HD Auto") }
 
-    // Initialize ExoPlayer and attach listener safely
-    DisposableEffect(streamUrl, playerManager) {
+    // Initialize ExoPlayer with headers from ResolvedStream
+    DisposableEffect(streamUrl, resolvedStreamState, playerManager) {
+        val stream = resolvedStreamState
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 isPlayingState = isPlaying
@@ -151,132 +158,86 @@ fun ExoVideoPlayer(
                 isBuffering = state == Player.STATE_BUFFERING
                 if (state == Player.STATE_READY) {
                     exoPlayer?.let { duration = it.duration }
+                    hasPlaybackError = false
                 }
                 if (state == Player.STATE_ENDED) {
                     isPlayingState = false
                 }
             }
             override fun onPlayerError(error: PlaybackException) {
-                Log.e("ExoVideoPlayer", "Player error: ${error.message}, switching to web player fallback")
-                useNativeExo = false
+                Log.w("ExoVideoPlayer", "Player error: [${error.errorCodeName}] ${error.message}")
+                hasPlaybackError = true
+                playbackErrorMessage = when (error.errorCode) {
+                    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> "Server video menolak koneksi (HTTP 403/404)"
+                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "Koneksi jaringan internet terputus atau timeout"
+                    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+                    PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED -> "Format HLS manifest tidak valid"
+                    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+                    PlaybackException.ERROR_CODE_DECODING_FAILED -> "Codec video perangkat tidak mendukung stream ini"
+                    else -> "Gagal memutar video: ${error.errorCodeName}"
+                }
             }
         }
 
-        val instance = playerManager.initializePlayer(streamUrl, listener)
+        val instance = playerManager.initializePlayer(
+            customHeaders = stream?.headers ?: emptyMap(),
+            externalListener = listener
+        )
         exoPlayer = instance
+
+        if (stream != null && stream.isDirect && useNativeExo) {
+            playerManager.prepareStream(stream)
+        }
 
         onDispose {
             playerManager.releasePlayer()
             exoPlayer = null
         }
     }
-    
-    // Prepare media on resolvedUrl change
-    LaunchedEffect(resolvedUrl, useNativeExo) {
-        if (resolvedUrl.isNotEmpty() && useNativeExo) {
-            try {
-                playerManager.prepareMedia(resolvedUrl)
-            } catch (e: Exception) {
-                Log.e("ExoVideoPlayer", "Error preparing media, fallback to web player", e)
-                useNativeExo = false
-            }
-        }
-    }
-    
-    // Lifecycle-aware Player Pause management on backgrounding
-    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            when (event) {
-                androidx.lifecycle.Lifecycle.Event.ON_PAUSE,
-                androidx.lifecycle.Lifecycle.Event.ON_STOP -> {
-                    playerManager.pausePlayer()
-                }
-                androidx.lifecycle.Lifecycle.Event.ON_DESTROY -> {
-                    playerManager.releasePlayer()
-                    exoPlayer = null
-                }
-                else -> {}
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-        }
-    }
-    
-    // Download speed simulation on buffering
-    LaunchedEffect(isBuffering) {
-        while (isBuffering) {
-            val randomSpeed = (3..14).random() + (0..9).random() / 10.0
-            bufferingSpeedText = String.format(Locale.US, "%.1f Mbps", randomSpeed)
-            delay(1000)
-        }
-    }
-    
-    // Track play position
-    LaunchedEffect(isPlayingState, playbackState) {
-        while (isPlayingState && playbackState == Player.STATE_READY) {
-            currentPosition = exoPlayer?.currentPosition ?: 0L
-            delay(500)
-        }
-    }
-    
-    // Auto-hide controls
+
+    // Auto-hide controls ticker & live position tracker
     LaunchedEffect(showControls, isPlayingState) {
-        if (showControls && isPlayingState) {
-            delay(3500)
+        if (showControls && isPlayingState && !isLocked) {
+            delay(4000)
             showControls = false
         }
     }
     
-    val stringBuilder = remember { StringBuilder() }
-    val formatter = remember { Formatter(stringBuilder, Locale.getDefault()) }
-    
-    fun formatTime(timeMs: Long): String {
-        if (timeMs <= 0) return "00:00"
-        val totalSeconds = (timeMs + 500) / 1000
-        val seconds = totalSeconds % 60
-        val minutes = (totalSeconds / 60) % 60
-        val hours = totalSeconds / 3600
-        stringBuilder.setLength(0)
-        return if (hours > 0) {
-            formatter.format("%d:%02d:%02d", hours, minutes, seconds).toString()
-        } else {
-            formatter.format("%02d:%02d", minutes, seconds).toString()
+    LaunchedEffect(isPlayingState) {
+        while (isPlayingState) {
+            exoPlayer?.let { p ->
+                currentPosition = p.currentPosition
+                duration = p.duration.coerceAtLeast(0L)
+                bandwidthSpeedText = playerManager.getFormattedBandwidthSpeed()
+            }
+            delay(1000)
         }
     }
-    
-    // Core Player Component rendered in normal view OR Fullscreen Dialog
+
+    // Main Player Composables
     @Composable
-    fun PlayerContent(fullScreenMode: Boolean, modifier: Modifier = Modifier) {
+    fun PlayerContent(
+        fullScreenMode: Boolean,
+        modifier: Modifier = Modifier
+    ) {
         Box(
             modifier = modifier
-                .fillMaxSize()
+                .fillMaxWidth()
+                .aspectRatio(if (fullScreenMode) 16f / 9f else 16f / 9f)
                 .background(Color.Black)
         ) {
-            if (!useNativeExo) {
-                // EMBEDDED WEB PLAYER ENGINE (Anti-Ad, Sandboxed, High-Performance)
+            if (!useNativeExo || (resolvedStreamState != null && !resolvedStreamState!!.isDirect)) {
+                // Embedded Sandboxed Web Engine
                 WebPlayerView(
-                    url = streamUrl,
+                    url = resolvedStreamState?.originalIframeUrl ?: streamUrl,
                     title = title,
-                    onBack = {
-                        if (fullScreenMode) isFullscreen = false else onBack()
-                    },
+                    onBack = onBack,
                     onSwitchToExo = {
-                        if (resolvedUrl.isNotEmpty()) {
-                            useNativeExo = true
-                            playerManager.prepareMedia(resolvedUrl)
-                        } else {
-                            scope.launch {
-                                isResolving = true
-                                val direct = VideoUrlResolver.resolve(context, streamUrl)
-                                if (direct.isNotEmpty()) {
-                                    resolvedUrl = direct
-                                    useNativeExo = true
-                                    playerManager.prepareMedia(direct)
-                                }
-                                isResolving = false
+                        useNativeExo = true
+                        resolvedStreamState?.let {
+                            if (it.isDirect) {
+                                playerManager.prepareStream(it)
                             }
                         }
                     },
@@ -285,167 +246,192 @@ fun ExoVideoPlayer(
                     isFullscreen = fullScreenMode
                 )
             } else {
-                // NATIVE EXOPLAYER ENGINE
-                Box(
+                // Native ExoPlayer Surface
+                AndroidView(
+                    factory = { ctx ->
+                        PlayerView(ctx).apply {
+                            useController = false
+                            this.resizeMode = resizeMode
+                            this.player = exoPlayer
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                        }
+                    },
+                    update = { view ->
+                        view.resizeMode = resizeMode
+                        if (view.player != exoPlayer) {
+                            view.player = exoPlayer
+                        }
+                    },
                     modifier = Modifier
                         .fillMaxSize()
                         .pointerInput(Unit) {
                             detectTapGestures(
+                                onTap = {
+                                    showControls = !showControls
+                                },
                                 onDoubleTap = { offset ->
-                                    val midX = size.width / 2
-                                    val pos = exoPlayer?.currentPosition ?: 0L
-                                    if (offset.x < midX) {
-                                        val target = (pos - 10000).coerceAtLeast(0)
-                                        exoPlayer?.seekTo(target)
-                                        currentPosition = target
-                                    } else {
-                                        val target = (pos + 10000).coerceAtMost(duration)
-                                        exoPlayer?.seekTo(target)
-                                        currentPosition = target
-                                    }
-                                },
-                                onTap = { showControls = !showControls }
-                            )
-                        }
-                        .pointerInput(Unit) {
-                            detectHorizontalDragGestures(
-                                onDragStart = { if (!isLocked) gestureSeekPreview = currentPosition },
-                                onDragEnd = {
-                                    if (gestureSeekPreview != -1L) {
-                                        exoPlayer?.seekTo(gestureSeekPreview)
-                                        currentPosition = gestureSeekPreview
-                                        gestureSeekPreview = -1L
-                                    }
-                                },
-                                onDragCancel = { gestureSeekPreview = -1L },
-                                onHorizontalDrag = { change, dragAmount ->
-                                    if (!isLocked) {
-                                        change.consume()
-                                        val addedSeek = (dragAmount * 150L).toLong()
-                                        gestureSeekPreview = (gestureSeekPreview + addedSeek).coerceIn(0, duration)
+                                    val width = size.width
+                                    val isRight = offset.x > width / 2
+                                    exoPlayer?.let { p ->
+                                        val delta = if (isRight) 10000L else -10000L
+                                        val newPos = (p.currentPosition + delta).coerceIn(0L, duration)
+                                        p.seekTo(newPos)
+                                        currentPosition = newPos
                                     }
                                 }
                             )
                         }
-                ) {
-                    AndroidView(
-                        factory = { ctx ->
-                            PlayerView(ctx).apply {
-                                useController = false
-                                this.resizeMode = resizeMode
-                                player = exoPlayer
-                                layoutParams = ViewGroup.LayoutParams(
-                                    ViewGroup.LayoutParams.MATCH_PARENT,
-                                    ViewGroup.LayoutParams.MATCH_PARENT
-                                )
-                            }
-                        },
-                        update = { playerView ->
-                            if (playerView.player != exoPlayer) {
-                                playerView.player = exoPlayer
-                            }
-                            playerView.resizeMode = resizeMode
-                        },
-                        modifier = Modifier.fillMaxSize()
-                    )
-
-                    // Seek gesture overlay
-                    if (gestureSeekPreview != -1L) {
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.Center)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color.Black.copy(alpha = 0.8f))
-                                .padding(horizontal = 20.dp, vertical = 12.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Icon(
-                                    imageVector = if (gestureSeekPreview > currentPosition) Icons.Filled.FastForward else Icons.Filled.FastRewind,
-                                    contentDescription = "Seek",
-                                    tint = Color(0xFF7000FF),
-                                    modifier = Modifier.size(36.dp)
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = "${formatTime(gestureSeekPreview)} / ${formatTime(duration)}",
-                                    color = Color.White,
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                    }
-                    
-                    // Buffering overlay
-                    if (isBuffering || isResolving) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(Color.Black.copy(alpha = 0.4f)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                CircularProgressIndicator(
-                                    color = Color(0xFF7000FF),
-                                    strokeWidth = 4.dp,
-                                    modifier = Modifier.size(48.dp)
-                                )
-                                Spacer(modifier = Modifier.height(12.dp))
-                                Text(text = bufferingSpeedText, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                                Text(text = if (isResolving) "Menyiapkan Stream..." else "Loading Video...", color = Color.Gray, fontSize = 11.sp)
-                            }
-                        }
-                    }
-                    
-                    // Custom Player Controls
-                    AnimatedVisibility(
-                        visible = showControls,
-                        enter = fadeIn(),
-                        exit = fadeOut()
+                )
+                
+                // Loading Resolver Indicator
+                if (isResolving) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.7f)),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(
-                                    Brush.verticalGradient(
-                                        colors = listOf(
-                                            Color.Black.copy(alpha = 0.8f),
-                                            Color.Transparent,
-                                            Color.Black.copy(alpha = 0.8f)
-                                        )
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(color = Color(0xFF00F2FE), strokeWidth = 3.dp, modifier = Modifier.size(40.dp))
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text("Mengekstrak stream HLS video...", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+                
+                // Buffering Indicator
+                if (isBuffering && !isResolving && !hasPlaybackError) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(color = Color(0xFF7000FF), strokeWidth = 3.dp, modifier = Modifier.size(44.dp))
+                    }
+                }
+
+                // Error Overlay with Recoverable Fallbacks
+                if (hasPlaybackError) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.88f))
+                            .padding(16.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.ErrorOutline,
+                                contentDescription = "Error",
+                                tint = Color(0xFFFF2A55),
+                                modifier = Modifier.size(42.dp)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Gagal Memutar Native ExoPlayer",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = playbackErrorMessage,
+                                color = Color(0xFF94A3B8),
+                                fontSize = 12.sp,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        hasPlaybackError = false
+                                        playerManager.retryPlayback()
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7000FF)),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Icon(Icons.Filled.Refresh, contentDescription = "Coba Ulang", modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Coba Ulang", fontSize = 12.sp)
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        hasPlaybackError = false
+                                        useNativeExo = false
+                                    },
+                                    shape = RoundedCornerShape(8.dp),
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF00F2FE))
+                                ) {
+                                    Text("Web Player", fontSize = 12.sp)
+                                }
+
+                                OutlinedButton(
+                                    onClick = { showServerSelector = true },
+                                    shape = RoundedCornerShape(8.dp),
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
+                                ) {
+                                    Text("Ganti Server", fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Controls Overlay
+                AnimatedVisibility(
+                    visible = showControls,
+                    enter = fadeIn(),
+                    exit = fadeOut()
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(
+                                        Color.Black.copy(alpha = 0.75f),
+                                        Color.Transparent,
+                                        Color.Black.copy(alpha = 0.85f)
                                     )
                                 )
-                        ) {
-                            if (isLocked) {
-                                IconButton(
-                                    onClick = { isLocked = false },
-                                    modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .padding(24.dp)
-                                        .background(Color.Black.copy(alpha = 0.6f), CircleShape)
-                                        .size(48.dp)
-                                        .statusBarsPadding()
-                                ) {
-                                    Icon(imageVector = Icons.Filled.Lock, contentDescription = "Unlock", tint = Color(0xFF7000FF))
-                                }
-                            } else {
-                                // Top Bar
+                            )
+                    ) {
+                        if (isLocked) {
+                            // Locked State: Show only unlock button
+                            IconButton(
+                                onClick = { isLocked = false },
+                                modifier = Modifier
+                                    .align(Alignment.TopStart)
+                                    .padding(16.dp)
+                                    .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+                                    .size(42.dp)
+                            ) {
+                                Icon(imageVector = Icons.Filled.Lock, contentDescription = "Unlock", tint = Color.White)
+                            }
+                        } else {
+                            // Unlocked: Full Controls Bar
+                            Column(
+                                modifier = Modifier.fillMaxSize(),
+                                verticalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                // Top Controls Bar
                                 Row(
                                     modifier = Modifier
-                                        .align(Alignment.TopCenter)
                                         .fillMaxWidth()
-                                        .padding(top = 12.dp, start = 12.dp, end = 12.dp),
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     IconButton(
-                                        onClick = {
-                                            if (fullScreenMode) {
-                                                isFullscreen = false
-                                            } else {
-                                                onBack()
-                                            }
-                                        },
+                                        onClick = onBack,
                                         modifier = Modifier
                                             .background(Color.Black.copy(alpha = 0.5f), CircleShape)
                                             .size(36.dp)
@@ -456,13 +442,25 @@ fun ExoVideoPlayer(
                                     Text(
                                         text = title,
                                         color = Color.White,
-                                        fontSize = 15.sp,
+                                        fontSize = 14.sp,
                                         fontWeight = FontWeight.Bold,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.weight(1f)
                                     )
                                     
+                                    // Bitrate badge
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(Color(0xFF1E293B))
+                                            .padding(horizontal = 6.dp, vertical = 3.dp)
+                                    ) {
+                                        Text(text = bandwidthSpeedText, color = Color(0xFF00F2FE), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                    }
+
+                                    Spacer(modifier = Modifier.width(6.dp))
+
                                     // Switch to Web Engine
                                     Box(
                                         modifier = Modifier
@@ -471,10 +469,10 @@ fun ExoVideoPlayer(
                                             .clickable { useNativeExo = false }
                                             .padding(horizontal = 8.dp, vertical = 4.dp)
                                     ) {
-                                        Text("Web Player", color = Color(0xFF00F2FE), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                        Text("Web Player", color = Color(0xFF94A3B8), fontSize = 10.sp, fontWeight = FontWeight.Bold)
                                     }
 
-                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
 
                                     IconButton(
                                         onClick = { showSettingsDialog = true },
@@ -484,7 +482,7 @@ fun ExoVideoPlayer(
                                     ) {
                                         Icon(imageVector = Icons.Filled.Settings, contentDescription = "Settings", tint = Color.White, modifier = Modifier.size(18.dp))
                                     }
-                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
                                     IconButton(
                                         onClick = { isLocked = true },
                                         modifier = Modifier
@@ -495,9 +493,9 @@ fun ExoVideoPlayer(
                                     }
                                 }
                                 
-                                // Center Playback Buttons
+                                // Center Playback Controls
                                 Row(
-                                    modifier = Modifier.align(Alignment.Center),
+                                    modifier = Modifier.align(Alignment.CenterHorizontally),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(32.dp)
                                 ) {
@@ -560,11 +558,10 @@ fun ExoVideoPlayer(
                                 // Bottom Controls Bar
                                 Column(
                                     modifier = Modifier
-                                        .align(Alignment.BottomCenter)
                                         .fillMaxWidth()
                                         .padding(horizontal = 14.dp, vertical = 8.dp)
                                 ) {
-                                    // Custom Slider
+                                    // Slider
                                     Slider(
                                         value = if (duration > 0) (currentPosition.toFloat() / duration).coerceIn(0f, 1f) else 0f,
                                         onValueChange = { frac ->
@@ -608,7 +605,7 @@ fun ExoVideoPlayer(
                                             
                                             Spacer(modifier = Modifier.width(8.dp))
                                             
-                                            // Real System Fullscreen Toggle
+                                            // Fullscreen Toggle
                                             IconButton(
                                                 onClick = { isFullscreen = !isFullscreen },
                                                 modifier = Modifier
@@ -659,7 +656,7 @@ fun ExoVideoPlayer(
         }
     }
     
-    // Check if in Fullscreen Mode
+    // Fullscreen Dialog Handler
     if (isFullscreen) {
         Dialog(
             onDismissRequest = { isFullscreen = false },
@@ -690,7 +687,7 @@ fun ExoVideoPlayer(
         PlayerContent(fullScreenMode = false, modifier = modifier)
     }
     
-    // Settings Dialog
+    // Settings Dialog (Speed & Real Quality Track Selection)
     if (showSettingsDialog) {
         AlertDialog(
             onDismissRequest = { showSettingsDialog = false },
@@ -709,7 +706,7 @@ fun ExoVideoPlayer(
                     Text("Kecepatan Putar", color = Color.Gray, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf(0.5f, 1.0f, 1.5f, 2.0f).forEach { speed ->
+                        listOf(0.5f, 1.0f, 1.25f, 1.5f, 2.0f).forEach { speed ->
                             Box(
                                 modifier = Modifier
                                     .weight(1f)
@@ -729,10 +726,10 @@ fun ExoVideoPlayer(
                     
                     Spacer(modifier = Modifier.height(20.dp))
                     
-                    Text("Kualitas Resolusi", color = Color.Gray, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Text("Kualitas Resolusi (HLS Track Selection)", color = Color.Gray, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(8.dp))
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf("360p", "480p", "720p", "1080p").forEach { res ->
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf("Auto", "360p", "480p", "720p", "1080p").forEach { res ->
                             Box(
                                 modifier = Modifier
                                     .weight(1f)
@@ -740,12 +737,13 @@ fun ExoVideoPlayer(
                                     .background(if (currentQuality == res) Color(0xFF7000FF) else Color.Black.copy(alpha = 0.3f))
                                     .clickable {
                                         currentQuality = res
+                                        playerManager.setVideoQuality(res)
                                         showSettingsDialog = false
                                     }
                                     .padding(vertical = 8.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text(text = res, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Text(text = res, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -756,7 +754,7 @@ fun ExoVideoPlayer(
                     onClick = { showSettingsDialog = false },
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7000FF))
                 ) {
-                    Text("Simpan", color = Color.White)
+                    Text("Selesai", color = Color.White)
                 }
             }
         )
@@ -812,7 +810,7 @@ fun ExoVideoPlayer(
 }
 
 /**
- * Sandboxed, GPU-Accelerated Web Player with Anti-Ad filters and custom overlay controls.
+ * Sandboxed, GPU-Accelerated Web Player with HLS Awareness, Anti-Ad filters, and custom overlay controls.
  */
 @Composable
 fun WebPlayerView(
@@ -825,7 +823,6 @@ fun WebPlayerView(
     isFullscreen: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
     var webViewInstance by remember { mutableStateOf<WebView?>(null) }
     var isLoading by remember(url) { mutableStateOf(true) }
     var loadProgress by remember(url) { mutableStateOf(0) }
@@ -870,12 +867,12 @@ fun WebPlayerView(
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val targetUrl = request?.url?.toString() ?: ""
                             val lower = targetUrl.lowercase()
-                            // Block ad popups, redirects, deep links
+                            // Smart blocking: Block obvious malicious app popups, schemes, deep links
                             if (lower.startsWith("intent://") || lower.startsWith("market://") || 
-                                lower.contains("shopee") || lower.contains("lazada") || 
-                                lower.contains("tokopedia") || lower.contains("adsterra") || 
-                                lower.contains("popcash") || lower.contains("bet") || lower.contains("casino")) {
-                                return true // Block
+                                lower.startsWith("whatsapp://") || lower.startsWith("tg://") ||
+                                lower.contains("adsterra") || lower.contains("popcash") || 
+                                lower.contains("bet88") || lower.contains("slot88") || lower.contains("casino")) {
+                                return true // Block navigation
                             }
                             return false
                         }
@@ -920,21 +917,61 @@ fun WebPlayerView(
 
                     var cleanUrl = url.trim()
                     if (cleanUrl.startsWith("//")) cleanUrl = "https:$cleanUrl"
-                    loadUrl(cleanUrl)
+                    
+                    // If the URL is a raw direct stream, generate a proper HTML5 player supporting both HLS and MP4
+                    if (cleanUrl.contains(".m3u8", ignoreCase = true)) {
+                        val hlsHtml = """
+                            <!DOCTYPE html>
+                            <html>
+                            <head>
+                                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                                <style>
+                                    html, body { margin:0; padding:0; width:100%; height:100%; background:#000; overflow:hidden; display:flex; justify-content:center; align-items:center; }
+                                    video { width:100%; height:100%; object-fit:contain; }
+                                </style>
+                                <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+                            </head>
+                            <body>
+                                <video id="video" controls autoplay playsinline></video>
+                                <script>
+                                    var video = document.getElementById('video');
+                                    var videoSrc = '$cleanUrl';
+                                    if (Hls.isSupported()) {
+                                        var hls = new Hls();
+                                        hls.loadSource(videoSrc);
+                                        hls.attachMedia(video);
+                                        hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                                            video.play().catch(function(){});
+                                        });
+                                    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                                        video.src = videoSrc;
+                                        video.addEventListener('loadedmetadata', function() {
+                                            video.play().catch(function(){});
+                                        });
+                                    }
+                                </script>
+                            </body>
+                            </html>
+                        """.trimIndent()
+                        loadDataWithBaseURL("https://anichin.vip", hlsHtml, "text/html", "UTF-8", null)
+                    } else {
+                        loadUrl(cleanUrl)
+                    }
+                    
                     webViewInstance = this
                 }
             },
             update = { webView ->
                 var cleanUrl = url.trim()
                 if (cleanUrl.startsWith("//")) cleanUrl = "https:$cleanUrl"
-                if (webView.url != cleanUrl && cleanUrl.isNotEmpty()) {
+                if (webView.url != cleanUrl && cleanUrl.isNotEmpty() && !cleanUrl.contains(".m3u8")) {
                     webView.loadUrl(cleanUrl)
                 }
             },
             modifier = Modifier.fillMaxSize()
         )
 
-        // Web Player Control Bar Overlay
+        // Web Player Top Control Overlay
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -1049,125 +1086,15 @@ private fun Context.findActivity(): Activity? = when (this) {
     else -> null
 }
 
-object HeadlessStreamExtractor {
-    suspend fun extractMediaUrl(context: Context, pageUrl: String, timeoutMs: Long = 4000L): String {
-        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-            kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
-                var isDone = false
-                val handler = android.os.Handler(android.os.Looper.getMainLooper())
-                var webView: WebView? = null
-
-                fun cleanup() {
-                    if (!isDone) {
-                        isDone = true
-                        handler.removeCallbacksAndMessages(null)
-                        try {
-                            webView?.stopLoading()
-                            webView?.loadUrl("about:blank")
-                            webView?.onPause()
-                            webView?.removeAllViews()
-                            webView?.destroy()
-                        } catch (e: Exception) {}
-                        webView = null
-                    }
-                }
-
-                val timeoutRunnable = Runnable {
-                    if (continuation.isActive && !isDone) {
-                        cleanup()
-                        continuation.resumeWith(Result.success(""))
-                    }
-                }
-                handler.postDelayed(timeoutRunnable, timeoutMs)
-
-                try {
-                    webView = WebView(context).apply {
-                        setLayerType(View.LAYER_TYPE_SOFTWARE, null)
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
-                        settings.mediaPlaybackRequiresUserGesture = false
-                        settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-
-                        webViewClient = object : WebViewClient() {
-                            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
-                                Log.w("HeadlessStreamExtractor", "Render process gone in HeadlessStreamExtractor (didCrash=${detail?.didCrash()})")
-                                if (continuation.isActive && !isDone) {
-                                    handler.post {
-                                        if (continuation.isActive && !isDone) {
-                                            cleanup()
-                                            continuation.resumeWith(Result.success(""))
-                                        }
-                                    }
-                                }
-                                return true
-                            }
-
-                            override fun onPageFinished(view: WebView?, url: String?) {
-                                super.onPageFinished(view, url)
-                                val autoPlayJs = """
-                                    (function() {
-                                        try {
-                                            var playBtns = document.querySelectorAll('.jw-video, .jw-button-color, .plyr__control--overlaid, .vjs-big-play-button, .play-button, [aria-label="Play"], #player, iframe, .video-js');
-                                            playBtns.forEach(function(btn) { btn.click(); });
-                                            var v = document.querySelector('video');
-                                            if (v) { v.play().catch(function(e){}); }
-                                        } catch(e){}
-                                    })();
-                                """.trimIndent()
-                                view?.evaluateJavascript(autoPlayJs, null)
-                            }
-                            
-                            override fun shouldInterceptRequest(
-                                view: WebView?,
-                                request: WebResourceRequest?
-                            ): WebResourceResponse? {
-                                val reqUrl = request?.url?.toString() ?: ""
-                                if (isMediaStreamUrl(reqUrl)) {
-                                    if (continuation.isActive && !isDone) {
-                                        handler.post {
-                                            if (continuation.isActive && !isDone) {
-                                                val foundMediaUrl = reqUrl
-                                                cleanup()
-                                                continuation.resumeWith(Result.success(foundMediaUrl))
-                                            }
-                                        }
-                                    }
-                                }
-                                return super.shouldInterceptRequest(view, request)
-                            }
-                        }
-                        var cleanUrl = pageUrl.trim()
-                        if (cleanUrl.startsWith("//")) cleanUrl = "https:$cleanUrl"
-                        loadUrl(cleanUrl)
-                    }
-                } catch (e: Exception) {
-                    if (continuation.isActive && !isDone) {
-                        cleanup()
-                        continuation.resumeWith(Result.success(""))
-                    }
-                }
-
-                continuation.invokeOnCancellation {
-                    cleanup()
-                }
-            }
-        }
-    }
-
-    private fun isMediaStreamUrl(url: String): Boolean {
-        val lower = url.lowercase()
-        if (lower.contains("googleads") || lower.contains("analytics") || lower.contains("doubleclick") || lower.contains("favicon")) {
-            return false
-        }
-        return lower.contains(".m3u8") ||
-               lower.contains(".mp4") ||
-               lower.contains("videoplayback") ||
-               (lower.contains(".m4s") && !lower.contains("audio"))
-    }
-}
-
-object VideoUrlResolver {
-    suspend fun resolve(context: Context, iframeUrl: String): String {
-        return com.example.data.AnichinStreamExtractor.extractStreamUrl(context, iframeUrl)
+private fun formatTime(ms: Long): String {
+    val totalSeconds = (ms / 1000).toInt()
+    val seconds = totalSeconds % 60
+    val minutes = (totalSeconds / 60) % 60
+    val hours = totalSeconds / 3600
+    val mFormatter = Formatter(StringBuilder(), Locale.getDefault())
+    return if (hours > 0) {
+        mFormatter.format("%d:%02d:%02d", hours, minutes, seconds).toString()
+    } else {
+        mFormatter.format("%02d:%02d", minutes, seconds).toString()
     }
 }

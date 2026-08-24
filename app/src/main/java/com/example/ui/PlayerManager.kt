@@ -5,7 +5,6 @@ import android.net.Uri
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.lifecycle.DefaultLifecycleObserver
-import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -13,10 +12,18 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
+import com.example.data.stream.ResolvedStream
+import com.example.data.stream.StreamMediaType
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -24,8 +31,8 @@ import kotlinx.coroutines.flow.asStateFlow
 /**
  * Dedicated Singleton PlayerManager for managing the ExoPlayer instance.
  * Ensures a single active player across the application lifecycle,
- * prevents player doubling / ghost audio, handles automatic resource cleanup,
- * and provides a robust, clean interface.
+ * preserves stream headers, implements real BandwidthMeter, Media3 Track Selection for quality,
+ * and robust error classification.
  */
 @OptIn(UnstableApi::class)
 class PlayerManager private constructor(context: Context) {
@@ -37,6 +44,11 @@ class PlayerManager private constructor(context: Context) {
     private var currentListener: Player.Listener? = null
     private var currentLifecycleOwner: LifecycleOwner? = null
     private var lifecycleObserver: DefaultLifecycleObserver? = null
+
+    // Real Bandwidth Meter for live speed calculation
+    private val bandwidthMeter: DefaultBandwidthMeter by lazy {
+        DefaultBandwidthMeter.Builder(appContext).build()
+    }
 
     // Reactive Player State Flows for Compose & UI observation
     private val _isPlaying = MutableStateFlow(false)
@@ -57,21 +69,23 @@ class PlayerManager private constructor(context: Context) {
     private val _lastError = MutableStateFlow<PlaybackException?>(null)
     val lastError: StateFlow<PlaybackException?> = _lastError.asStateFlow()
 
+    private val _currentQuality = MutableStateFlow("Auto")
+    val currentQuality: StateFlow<String> = _currentQuality.asStateFlow()
+
+    // Current prepared stream
+    private var activeStream: ResolvedStream? = null
+
     val player: ExoPlayer?
         get() = exoPlayer
 
     companion object {
         private const val TAG = "PlayerManager"
         private const val DEFAULT_USER_AGENT =
-            "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
         @Volatile
         private var INSTANCE: PlayerManager? = null
 
-        /**
-         * Returns the Singleton instance of PlayerManager.
-         * Thread-safe double-checked locking prevents concurrent instantiation.
-         */
         fun getInstance(context: Context): PlayerManager {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: PlayerManager(context).also { INSTANCE = it }
@@ -80,53 +94,78 @@ class PlayerManager private constructor(context: Context) {
     }
 
     /**
-     * Initializes or re-initializes the ExoPlayer with proper HTTP DataSource & media headers.
-     * Guarantees that any existing active instance is cleanly stopped and released first.
+     * Initializes player with referer URL string.
      */
-    @Synchronized
     fun initializePlayer(
-        refererUrl: String = "",
+        refererUrl: String,
         externalListener: Player.Listener? = null
     ): ExoPlayer {
-        // Step 1: Explicitly release previous instance to prevent player doubling & leaks
-        releasePlayer()
-
-        Log.d(TAG, "Initializing new ExoPlayer instance for referer: $refererUrl")
-
-        // Step 2: Configure Origin and Referer headers for protected streams
         val domainOrigin = try {
             val uri = Uri.parse(refererUrl)
             if (uri.scheme != null && uri.host != null) "${uri.scheme}://${uri.host}" else refererUrl
         } catch (e: Exception) {
             refererUrl
         }
+        val headers = mapOf(
+            "Referer" to refererUrl,
+            "Origin" to domainOrigin
+        )
+        return initializePlayer(headers, externalListener)
+    }
 
+    /**
+     * Initializes or re-initializes the ExoPlayer with custom request headers and bandwidth meter.
+     */
+    @Synchronized
+    fun initializePlayer(
+        customHeaders: Map<String, String> = emptyMap(),
+        externalListener: Player.Listener? = null
+    ): ExoPlayer {
+        // Step 1: Release previous instance cleanly
+        releasePlayer()
+
+        Log.d(TAG, "Initializing new ExoPlayer with custom headers: ${customHeaders.keys}")
+
+        // Step 2: Build HTTP DataSource with stream headers
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent(DEFAULT_USER_AGENT)
+            .setUserAgent(customHeaders["User-Agent"] ?: DEFAULT_USER_AGENT)
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(25000)
             .setReadTimeoutMs(25000)
+            .setTransferListener(bandwidthMeter)
             .setDefaultRequestProperties(
-                mapOf(
-                    "Referer" to refererUrl,
-                    "Origin" to domainOrigin,
+                mutableMapOf(
                     "Accept" to "*/*",
                     "Sec-Fetch-Mode" to "cors",
                     "Sec-Fetch-Site" to "cross-site"
-                )
+                ).apply {
+                    putAll(customHeaders)
+                }
             )
 
         val mediaSourceFactory = DefaultMediaSourceFactory(httpDataSourceFactory)
 
-        // Step 3: Build ExoPlayer with movie-optimized audio attributes and noisy audio handling
+        // Custom load control for fast buffering
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                15000, // minBufferMs
+                50000, // maxBufferMs
+                2500,  // bufferForPlaybackMs
+                5000   // bufferForPlaybackAfterRebufferMs
+            )
+            .build()
+
+        // Step 3: Build ExoPlayer
         val newPlayer = ExoPlayer.Builder(appContext)
             .setMediaSourceFactory(mediaSourceFactory)
+            .setLoadControl(loadControl)
+            .setBandwidthMeter(bandwidthMeter)
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
                     .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
                     .build(),
-                true // handleAudioFocus = true
+                true
             )
             .setHandleAudioBecomingNoisy(true)
             .build()
@@ -134,7 +173,7 @@ class PlayerManager private constructor(context: Context) {
                 playWhenReady = true
             }
 
-        // Step 4: Register internal state listener & optional external listener
+        // Step 4: Register listener
         val internalListener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 _isPlaying.value = playing
@@ -158,7 +197,7 @@ class PlayerManager private constructor(context: Context) {
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                Log.e(TAG, "ExoPlayer Error encountered: ${error.errorCodeName} - ${error.message}", error)
+                Log.e(TAG, "ExoPlayer error (${error.errorCodeName}): ${error.message}", error)
                 _lastError.value = error
                 _isPlaying.value = false
                 _isBuffering.value = false
@@ -175,30 +214,41 @@ class PlayerManager private constructor(context: Context) {
     }
 
     /**
-     * Prepares and starts playback of a resolved media source URL (HLS/m3u8, DASH/mpd, or MP4).
+     * Prepares and starts playback of a [ResolvedStream] with full header context and HLS awareness.
      */
     @Synchronized
-    fun prepareMedia(mediaUrl: String, playWhenReady: Boolean = true) {
+    fun prepareStream(stream: ResolvedStream, playWhenReady: Boolean = true) {
         val p = exoPlayer ?: return
+        activeStream = stream
+
         try {
-            Log.d(TAG, "Preparing media URL: $mediaUrl")
+            Log.d(TAG, "Preparing ResolvedStream: ${stream.url} (type=${stream.mediaType})")
             p.stop()
             p.clearMediaItems()
 
-            val uri = Uri.parse(mediaUrl)
+            val uri = Uri.parse(stream.url)
             val mediaItemBuilder = MediaItem.Builder().setUri(uri)
 
-            // Auto-detect MIME type based on file extension / streaming protocol
-            val lower = mediaUrl.lowercase()
-            when {
-                lower.contains(".m3u8") -> {
+            when (stream.mediaType) {
+                StreamMediaType.HLS -> {
                     mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
                 }
-                lower.contains(".mpd") -> {
+                StreamMediaType.DASH -> {
                     mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_MPD)
                 }
-                lower.endsWith(".mp4") || lower.contains(".mp4?") -> {
+                StreamMediaType.MP4 -> {
                     mediaItemBuilder.setMimeType(MimeTypes.VIDEO_MP4)
+                }
+                else -> {
+                    // Fallback detection from URL
+                    val lower = stream.url.lowercase()
+                    if (lower.contains(".m3u8")) {
+                        mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
+                    } else if (lower.contains(".mpd")) {
+                        mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_MPD)
+                    } else if (lower.endsWith(".mp4") || lower.contains(".mp4?")) {
+                        mediaItemBuilder.setMimeType(MimeTypes.VIDEO_MP4)
+                    }
                 }
             }
 
@@ -209,13 +259,90 @@ class PlayerManager private constructor(context: Context) {
                 p.play()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error preparing media item: ${e.message}", e)
+            Log.e(TAG, "Error preparing media source: ${e.message}", e)
         }
     }
 
     /**
-     * Toggles play / pause state.
+     * Overload for raw URL string.
      */
+    fun prepareMedia(mediaUrl: String, playWhenReady: Boolean = true) {
+        val stream = ResolvedStream(
+            url = mediaUrl,
+            mediaType = if (mediaUrl.lowercase().contains(".m3u8")) StreamMediaType.HLS else StreamMediaType.MP4,
+            isDirectVideo = true
+        )
+        prepareStream(stream, playWhenReady)
+    }
+
+    /**
+     * Changes video quality using real Media3 TrackSelectionParameters.
+     * Supports: "Auto", "1080p", "720p", "480p", "360p".
+     */
+    fun setVideoQuality(quality: String) {
+        val p = exoPlayer ?: return
+        _currentQuality.value = quality
+
+        val builder = p.trackSelectionParameters.buildUpon()
+
+        when (quality.lowercase()) {
+            "1080p" -> {
+                builder.setMaxVideoSize(1920, 1080)
+                    .setMinVideoSize(1280, 720)
+            }
+            "720p" -> {
+                builder.setMaxVideoSize(1280, 720)
+                    .setMinVideoSize(854, 480)
+            }
+            "480p" -> {
+                builder.setMaxVideoSize(854, 480)
+                    .setMinVideoSize(640, 360)
+            }
+            "360p" -> {
+                builder.setMaxVideoSize(640, 360)
+                    .setMinVideoSize(0, 0)
+            }
+            else -> {
+                // Auto: Clear constraints
+                builder.clearVideoSizeConstraints()
+            }
+        }
+
+        p.trackSelectionParameters = builder.build()
+        Log.d(TAG, "Applied video quality constraint: $quality")
+    }
+
+    /**
+     * Gets real estimated bitrate in Mbps from DefaultBandwidthMeter.
+     */
+    fun getEstimatedBitrateMbps(): Float {
+        val bps = bandwidthMeter.bitrateEstimate
+        if (bps <= 0L) return 0f
+        return (bps.toFloat() / 1_000_000f)
+    }
+
+    /**
+     * Formats real bandwidth for UI display.
+     */
+    fun getFormattedBandwidthSpeed(): String {
+        val mbps = getEstimatedBitrateMbps()
+        return if (mbps > 0.05f) {
+            String.format(java.util.Locale.US, "%.1f Mbps", mbps)
+        } else {
+            "HD Auto"
+        }
+    }
+
+    fun retryPlayback() {
+        val current = activeStream
+        if (current != null) {
+            prepareStream(current, playWhenReady = true)
+        } else {
+            exoPlayer?.prepare()
+            exoPlayer?.play()
+        }
+    }
+
     fun togglePlayPause() {
         exoPlayer?.let { p ->
             if (p.isPlaying) {
@@ -226,9 +353,6 @@ class PlayerManager private constructor(context: Context) {
         }
     }
 
-    /**
-     * Pauses playback safely.
-     */
     fun pausePlayer() {
         try {
             exoPlayer?.pause()
@@ -238,9 +362,6 @@ class PlayerManager private constructor(context: Context) {
         }
     }
 
-    /**
-     * Resumes playback.
-     */
     fun playPlayer() {
         try {
             exoPlayer?.play()
@@ -250,9 +371,6 @@ class PlayerManager private constructor(context: Context) {
         }
     }
 
-    /**
-     * Seeks to a specified position in milliseconds.
-     */
     fun seekTo(positionMs: Long) {
         exoPlayer?.let { p ->
             try {
@@ -265,9 +383,6 @@ class PlayerManager private constructor(context: Context) {
         }
     }
 
-    /**
-     * Adjusts playback speed (0.25x to 2.0x).
-     */
     fun setPlaybackSpeed(speed: Float) {
         exoPlayer?.let { p ->
             try {
@@ -278,18 +393,12 @@ class PlayerManager private constructor(context: Context) {
         }
     }
 
-    /**
-     * Updates the current playback position.
-     */
     fun updatePosition(): Long {
         val pos = exoPlayer?.currentPosition ?: 0L
         _currentPosition.value = pos
         return pos
     }
 
-    /**
-     * Attaches lifecycle management to automatically pause on background and release on destroy.
-     */
     fun attachLifecycle(lifecycleOwner: LifecycleOwner) {
         detachLifecycle()
         currentLifecycleOwner = lifecycleOwner
@@ -313,9 +422,6 @@ class PlayerManager private constructor(context: Context) {
         lifecycleOwner.lifecycle.addObserver(observer)
     }
 
-    /**
-     * Detaches the lifecycle observer.
-     */
     fun detachLifecycle() {
         currentLifecycleOwner?.let { owner ->
             lifecycleObserver?.let { obs ->
@@ -326,10 +432,6 @@ class PlayerManager private constructor(context: Context) {
         lifecycleObserver = null
     }
 
-    /**
-     * Fully and explicitly stops, releases, and nullifies the ExoPlayer instance.
-     * Clears all listeners and media items to guarantee 0% memory leakage and no duplicate audio.
-     */
     @Synchronized
     fun releasePlayer() {
         exoPlayer?.let { p ->

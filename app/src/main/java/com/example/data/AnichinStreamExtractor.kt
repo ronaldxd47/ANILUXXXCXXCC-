@@ -30,59 +30,13 @@ object AnichinStreamExtractor {
 
     /**
      * Fungsi utama suspend untuk mengekstrak URL video langsung dari link iframe / embed.
+     * Menggunakan StreamResolver terpusat untuk resolusi stream yang stabil dan andal.
      */
     suspend fun extractStreamUrl(context: Context, iframeUrl: String): String = withContext(Dispatchers.IO) {
-        if (iframeUrl.isBlank()) return@withContext ""
-
-        var cleanUrl = iframeUrl.trim()
-        if (cleanUrl.startsWith("//")) {
-            cleanUrl = "https:$cleanUrl"
-        }
-
-        // 1. Cek jika URL berupa Base64 encoded string
-        if (!cleanUrl.startsWith("http")) {
-            try {
-                val decoded = String(Base64.decode(cleanUrl, Base64.DEFAULT)).trim()
-                if (decoded.startsWith("http") || decoded.contains(".m3u8") || decoded.contains(".mp4")) {
-                    cleanUrl = decoded
-                }
-            } catch (e: Exception) {
-                Log.d(TAG, "Base64 decode skipped for input: $cleanUrl")
-            }
-        }
-
-        if (!cleanUrl.startsWith("http")) {
-            return@withContext ""
-        }
-
-        // 2. Jika URL sudah berupa direct stream (.m3u8 atau .mp4), langsung kembalikan
-        if (isDirectStreamUrl(cleanUrl)) {
-            Log.d(TAG, "Direct stream URL detected: $cleanUrl")
-            return@withContext cleanUrl
-        }
-
-        // 3. Ekstraksi Statis HTTP Request + Parsing HTML/JS
-        try {
-            val staticUrl = resolveStaticHtmlStream(cleanUrl)
-            if (staticUrl.isNotEmpty()) {
-                Log.d(TAG, "Static extraction succeeded: $staticUrl")
-                return@withContext staticUrl
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Static stream resolution error: ${e.message}")
-        }
-
-        // 4. Fallback ke Headless WebView Extractor (Dynamic Network Sniffer) jika parsing statis gagal
-        return@withContext try {
-            val dynamicUrl = com.example.ui.HeadlessStreamExtractor.extractMediaUrl(context, cleanUrl)
-            if (dynamicUrl.isNotEmpty()) {
-                Log.d(TAG, "Dynamic Headless Extractor succeeded: $dynamicUrl")
-                dynamicUrl
-            } else {
-                ""
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Headless stream extraction failed: ${e.message}")
+        val resolved = com.example.data.stream.StreamResolver.resolve(context, iframeUrl)
+        if (resolved.isDirect) {
+            resolved.url
+        } else {
             ""
         }
     }
