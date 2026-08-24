@@ -20,7 +20,7 @@ class ScheduleRepository {
         val combinedMap = daysList.associateWith { mutableListOf<ScheduleAnime>() }.toMutableMap()
 
         try {
-            kotlinx.coroutines.withTimeoutOrNull(6000) {
+            kotlinx.coroutines.withTimeoutOrNull(8000) {
                 coroutineScope {
                     val anichinDef = async { try { AnichinScraper.fetchSchedule() } catch (e: Exception) { emptyList() } }
                     val samehadakuDef = async { try { SamehadakuScraper.fetchSchedule() } catch (e: Exception) { emptyList() } }

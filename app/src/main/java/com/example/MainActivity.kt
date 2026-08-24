@@ -2903,9 +2903,11 @@ fun VideoPlayerWebView(
                         settings.apply {
                             javaScriptEnabled = true
                             domStorageEnabled = true
+                            allowFileAccess = false
+                            allowContentAccess = false
                             loadWithOverviewMode = true
                             useWideViewPort = true
-                            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                             mediaPlaybackRequiresUserGesture = false
                             setSupportZoom(false)
                             builtInZoomControls = false

@@ -14,15 +14,13 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.CancellationException
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import java.util.Base64
-import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManager
-import javax.net.ssl.X509TrustManager
-import java.security.cert.X509Certificate
-import java.security.SecureRandom
-import javax.net.ssl.HttpsURLConnection
 import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -90,21 +88,13 @@ object SamehadakuScraper {
     // Domain list
     val DOMAINS = listOf(
         "https://samehadaku.li",
+        "https://samehadaku.stream",
+        "https://samehadaku.care",
         "https://samehadaku.email",
         "https://v2.samehadaku.how",
         "https://samehadaku.ac"
     )
     var BASE_URL = DOMAINS[0]
-
-    val unsafeX509TrustManager = object : X509TrustManager {
-        override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
-        override fun checkClientTrusted(certs: Array<X509Certificate>, authType: String) {}
-        override fun checkServerTrusted(certs: Array<X509Certificate>, authType: String) {}
-    }
-
-    val unsafeSslSocketFactory: javax.net.ssl.SSLSocketFactory = SSLContext.getInstance("TLS").apply {
-        init(null, arrayOf<TrustManager>(unsafeX509TrustManager), SecureRandom())
-    }.socketFactory
 
     object DohDns : Dns {
         private const val DNS_TAG = "DohDns"
@@ -125,56 +115,46 @@ object SamehadakuScraper {
                 return listOf(java.net.InetAddress.getByName("8.8.8.8"))
             }
 
-            // Google DoH via raw IP
+            // Standard Google DoH
             try {
-                val url = java.net.URL("https://8.8.8.8/resolve?name=$hostname&type=A")
+                val url = java.net.URL("https://dns.google/resolve?name=$hostname&type=A")
                 val conn = url.openConnection() as java.net.HttpURLConnection
                 conn.requestMethod = "GET"
                 conn.setRequestProperty("Accept", "application/json")
                 conn.connectTimeout = 3000
                 conn.readTimeout = 3000
-                
-                if (conn is javax.net.ssl.HttpsURLConnection) {
-                    conn.sslSocketFactory = unsafeSslSocketFactory
-                    conn.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, _ -> true }
-                }
 
                 if (conn.responseCode == 200) {
                     val response = conn.inputStream.bufferedReader().use { it.readText() }
                     val ips = parseJsonIps(response)
                     if (ips.isNotEmpty()) {
-                        Log.d(DNS_TAG, "Resolved $hostname via Google DoH IP to: $ips")
+                        Log.d(DNS_TAG, "Resolved $hostname via Google DoH to: $ips")
                         return ips.map { java.net.InetAddress.getByName(it) }
                     }
                 }
             } catch (e: Exception) {
-                Log.e(DNS_TAG, "Google DoH IP lookup failed for $hostname: ${e.message}")
+                Log.d(DNS_TAG, "Google DoH lookup failed for $hostname: ${e.message}")
             }
 
-            // Cloudflare DoH via raw IP
+            // Standard Cloudflare DoH
             try {
-                val url = java.net.URL("https://1.1.1.1/dns-query?name=$hostname&type=A")
+                val url = java.net.URL("https://cloudflare-dns.com/dns-query?name=$hostname&type=A")
                 val conn = url.openConnection() as java.net.HttpURLConnection
                 conn.requestMethod = "GET"
                 conn.setRequestProperty("Accept", "application/dns-json")
                 conn.connectTimeout = 3000
                 conn.readTimeout = 3000
 
-                if (conn is javax.net.ssl.HttpsURLConnection) {
-                    conn.sslSocketFactory = unsafeSslSocketFactory
-                    conn.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, _ -> true }
-                }
-
                 if (conn.responseCode == 200) {
                     val response = conn.inputStream.bufferedReader().use { it.readText() }
                     val ips = parseJsonIps(response)
                     if (ips.isNotEmpty()) {
-                        Log.d(DNS_TAG, "Resolved $hostname via Cloudflare DoH IP to: $ips")
+                        Log.d(DNS_TAG, "Resolved $hostname via Cloudflare DoH to: $ips")
                         return ips.map { java.net.InetAddress.getByName(it) }
                     }
                 }
             } catch (e: Exception) {
-                Log.e(DNS_TAG, "Cloudflare DoH IP lookup failed for $hostname: ${e.message}")
+                Log.d(DNS_TAG, "Cloudflare DoH lookup failed for $hostname: ${e.message}")
             }
 
             Log.d(DNS_TAG, "Falling back to system DNS for $hostname")
@@ -194,22 +174,10 @@ object SamehadakuScraper {
     private val okHttpClient = OkHttpClient.Builder()
         .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
         .connectionSpecs(listOf(
-            okhttp3.ConnectionSpec.Builder(okhttp3.ConnectionSpec.MODERN_TLS)
-                .tlsVersions(okhttp3.TlsVersion.TLS_1_2, okhttp3.TlsVersion.TLS_1_3)
-                .cipherSuites(
-                    okhttp3.CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-                    okhttp3.CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-                    okhttp3.CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-                    okhttp3.CipherSuite.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-                    okhttp3.CipherSuite.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-                    okhttp3.CipherSuite.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
-                )
-                .build(),
+            okhttp3.ConnectionSpec.MODERN_TLS,
             okhttp3.ConnectionSpec.COMPATIBLE_TLS,
             okhttp3.ConnectionSpec.CLEARTEXT
         ))
-        .sslSocketFactory(unsafeSslSocketFactory, unsafeX509TrustManager)
-        .hostnameVerifier { _, _ -> true }
         .dns(DohDns)
         .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
@@ -229,23 +197,6 @@ object SamehadakuScraper {
             }
         })
         .build()
-
-    init {
-        try {
-            val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
-                override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
-                override fun checkClientTrusted(certs: Array<X509Certificate>, authType: String) {}
-                override fun checkServerTrusted(certs: Array<X509Certificate>, authType: String) {}
-            })
-            val sc = SSLContext.getInstance("SSL")
-            sc.init(null, trustAllCerts, SecureRandom())
-            HttpsURLConnection.setDefaultSSLSocketFactory(sc.socketFactory)
-            HttpsURLConnection.setDefaultHostnameVerifier { _, _ -> true }
-            Log.d(TAG, "Unsafe SSL initialized")
-        } catch (e: Exception) {
-            Log.e(TAG, "Unsafe SSL init failed", e)
-        }
-    }
 
     private val cookieStore = java.util.concurrent.ConcurrentHashMap<String, Map<String, String>>()
 
@@ -425,26 +376,71 @@ object SamehadakuScraper {
         Log.d(TAG, "WebView loading URL: $url")
         webView.loadUrl(url)
         
-        // Safety timeout of 35 seconds
-        val timeoutJob = kotlinx.coroutines.GlobalScope.launch(Dispatchers.Main) {
-            kotlinx.coroutines.delay(35000)
+        // Safety timeout of 20 seconds using Handler on Main thread
+        val timeoutRunnable = Runnable {
             if (!hasFinished) {
                 hasFinished = true
-                webView.destroy()
+                try { webView.destroy() } catch (e: Exception) {}
                 deferred.complete(null)
             }
         }
+        val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        mainHandler.postDelayed(timeoutRunnable, 20000)
         
         deferred.await().also {
-            timeoutJob.cancel()
+            mainHandler.removeCallbacks(timeoutRunnable)
         }
     }
 
     suspend fun getDocWithFallback(urlPath: String): Document? {
         val path = getRelativePath(urlPath)
         
-        // 1. First attempt: Parallel direct HTTP connections (extremely fast, handles 95% of requests instantly)
+        // 1. Fast path: Direct attempt on current BASE_URL (fast response without launching multiple threads)
         try {
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            val fastDoc = withContext(Dispatchers.IO) {
+                try {
+                    val fullUrl = "$BASE_URL$path"
+                    val doc = Jsoup.connect(fullUrl)
+                        .userAgent(USER_AGENT_DESKTOP)
+                        .referrer("https://www.google.com/")
+                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+                        .header("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8")
+                        .timeout(2800)
+                        .get()
+
+                    val title = doc.title().lowercase()
+                    val isBlocked = title.contains("cloudflare") || 
+                                    title.contains("attention required") ||
+                                    title.contains("checking your browser") ||
+                                    title.contains("just a moment") ||
+                                    title.contains("ddos") ||
+                                    doc.outerHtml().contains("cf-browser-verification") ||
+                                    doc.outerHtml().contains("ray id")
+
+                    if (!isBlocked) {
+                        val hasContent = doc.select(".animepost, .post-show, .infox, .episodelist, .listeps, .listupd, .bsx, .bs").isNotEmpty()
+                        if (hasContent || path == "/" || path == "" || path == "/jadwal-rilis/") {
+                            doc
+                        } else null
+                    } else null
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    null
+                }
+            }
+            if (fastDoc != null) {
+                return fastDoc
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Fast path missed, proceed to parallel race
+        }
+
+        // 2. Parallel direct HTTP race across candidate domains
+        try {
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
             val resultDoc = withContext(Dispatchers.IO) {
                 coroutineScope {
                     val resultChannel = kotlinx.coroutines.channels.Channel<Pair<String, Document>?>(DOMAINS.size)
@@ -455,11 +451,11 @@ object SamehadakuScraper {
                                 val base = domain.trimEnd('/')
                                 val fullUrl = "$base$path"
                                 val doc = Jsoup.connect(fullUrl)
-                                    .userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                                    .userAgent(USER_AGENT_DESKTOP)
                                     .referrer("https://www.google.com/")
                                     .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8")
                                     .header("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")
-                                    .timeout(4000) // 4 seconds fast parallel timeout
+                                    .timeout(3500)
                                     .get()
                                 
                                 val title = doc.title().lowercase()
@@ -482,6 +478,7 @@ object SamehadakuScraper {
                                     resultChannel.send(null)
                                 }
                             } catch (e: Exception) {
+                                if (e is kotlinx.coroutines.CancellationException) throw e
                                 resultChannel.send(null)
                             }
                         }
@@ -510,40 +507,47 @@ object SamehadakuScraper {
                 Log.d(TAG, "Parallel Jsoup Direct search succeeded for $path on domain $BASE_URL")
                 return resultDoc.second
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Parallel Jsoup Direct search failed: ${e.message}")
+            Log.d(TAG, "Parallel Jsoup Direct search skipped: ${e.message}")
         }
 
-        // 2. Second attempt: Headless WebView scraper (extremely robust fallback for Cloudflare)
-        appContext?.let { context ->
-            for (domain in DOMAINS) {
-                val base = domain.trimEnd('/')
-                val fullUrl = "$base$path"
-                try {
-                    Log.d(TAG, "Attempting fallback WebView scraping for: $fullUrl")
-                    val html = scrapeWithWebView(context, fullUrl)
-                    if (!html.isNullOrEmpty()) {
-                        val doc = Jsoup.parse(html, fullUrl)
-                        val title = doc.title().lowercase()
-                        val isBlocked = title.contains("cloudflare") || 
-                                        title.contains("attention required") ||
-                                        title.contains("checking your browser") ||
-                                        title.contains("just a moment") ||
-                                        title.contains("ddos") ||
-                                        html.contains("cf-browser-verification") ||
-                                        html.contains("ray id")
+        // 3. Fallback: Headless WebView scraper (only if coroutine is still active)
+        if (kotlinx.coroutines.currentCoroutineContext().isActive) {
+            appContext?.let { context ->
+                for (domain in DOMAINS) {
+                    if (!kotlinx.coroutines.currentCoroutineContext().isActive) break
+                    val base = domain.trimEnd('/')
+                    val fullUrl = "$base$path"
+                    try {
+                        Log.d(TAG, "Attempting fallback WebView scraping for: $fullUrl")
+                        val html = scrapeWithWebView(context, fullUrl)
+                        if (!html.isNullOrEmpty()) {
+                            val doc = Jsoup.parse(html, fullUrl)
+                            val title = doc.title().lowercase()
+                            val isBlocked = title.contains("cloudflare") || 
+                                            title.contains("attention required") ||
+                                            title.contains("checking your browser") ||
+                                            title.contains("just a moment") ||
+                                            title.contains("ddos") ||
+                                            html.contains("cf-browser-verification") ||
+                                            html.contains("ray id")
 
-                        if (!isBlocked) {
-                            val hasContent = doc.select(".animepost, .post-show, .infox, .episodelist, .listeps, .listupd, .post-show article, .listupd article, .bsx, .bs").isNotEmpty()
-                            if (hasContent || path == "/" || path == "/anime-terbaru/" || path == "/daftar-anime-2/" || path == "/jadwal-rilis/") {
-                                Log.d(TAG, "WebView fallback successfully loaded Samehadaku with domain $domain")
-                                BASE_URL = base
-                                return doc
+                            if (!isBlocked) {
+                                val hasContent = doc.select(".animepost, .post-show, .infox, .episodelist, .listeps, .listupd, .post-show article, .listupd article, .bsx, .bs").isNotEmpty()
+                                if (hasContent || path == "/" || path == "/anime-terbaru/" || path == "/daftar-anime-2/" || path == "/jadwal-rilis/") {
+                                    Log.d(TAG, "WebView fallback successfully loaded Samehadaku with domain $domain")
+                                    BASE_URL = base
+                                    return doc
+                                }
                             }
                         }
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w(TAG, "WebView fallback scraping failed for domain $domain: ${e.message}")
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "WebView fallback scraping failed for domain $domain", e)
                 }
             }
         }

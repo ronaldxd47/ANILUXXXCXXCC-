@@ -123,6 +123,7 @@ object StreamResolver {
 
     /**
      * Inspects target URL via HTTP GET and searches for embedded streams.
+     * Uses .use {} pattern on OkHttp Response to prevent socket leaks, and resolves relative URLs.
      */
     private fun resolveStaticStream(targetUrl: String, serverName: String): ResolvedStream? {
         val headers = createStandardHeaders(targetUrl)
@@ -131,47 +132,86 @@ object StreamResolver {
             .headers(okhttp3.Headers.headersOf(*headers.flatMap { listOf(it.key, it.value) }.toTypedArray()))
             .build()
 
-        val response: Response = httpClient.newCall(request).execute()
-        val contentType = response.header("Content-Type", "")?.lowercase() ?: ""
+        return httpClient.newCall(request).execute().use { response ->
+            val contentType = response.header("Content-Type", "")?.lowercase() ?: ""
 
-        // Check if response is actually a stream directly
-        if (contentType.contains("application/vnd.apple.mpegurl") ||
-            contentType.contains("application/x-mpegurl") ||
-            contentType.contains("audio/x-mpegurl")
-        ) {
-            return ResolvedStream(
-                url = targetUrl,
-                mediaType = StreamMediaType.HLS,
-                headers = headers,
-                isDirectVideo = true,
-                serverName = serverName,
-                originalIframeUrl = targetUrl
-            )
-        }
-        if (contentType.contains("video/mp4") || contentType.contains("video/webm") || contentType.contains("video/mkv")) {
-            return ResolvedStream(
-                url = targetUrl,
-                mediaType = StreamMediaType.MP4,
-                headers = headers,
-                isDirectVideo = true,
-                serverName = serverName,
-                originalIframeUrl = targetUrl
-            )
-        }
+            // Check if response is actually a stream directly
+            if (contentType.contains("application/vnd.apple.mpegurl") ||
+                contentType.contains("application/x-mpegurl") ||
+                contentType.contains("audio/x-mpegurl")
+            ) {
+                return@use ResolvedStream(
+                    url = targetUrl,
+                    mediaType = StreamMediaType.HLS,
+                    headers = headers,
+                    isDirectVideo = true,
+                    serverName = serverName,
+                    originalIframeUrl = targetUrl
+                )
+            }
+            if (contentType.contains("video/mp4") || contentType.contains("video/webm") || contentType.contains("video/mkv")) {
+                return@use ResolvedStream(
+                    url = targetUrl,
+                    mediaType = StreamMediaType.MP4,
+                    headers = headers,
+                    isDirectVideo = true,
+                    serverName = serverName,
+                    originalIframeUrl = targetUrl
+                )
+            }
 
-        val html = response.body?.string() ?: return null
+            val html = response.body?.string() ?: return@use null
 
-        // A. Video tag (<video src="..." /> or <source src="..." />)
-        val doc = Jsoup.parse(html)
-        val videoEl = doc.select("video source, video").firstOrNull()
-        if (videoEl != null) {
-            val src = videoEl.attr("src").trim()
-            if (src.isNotEmpty() && !src.startsWith("blob:")) {
-                val fullSrc = if (src.startsWith("//")) "https:$src" else src
-                if (fullSrc.startsWith("http")) {
-                    val mediaType = detectMediaType(fullSrc, videoEl.attr("type"))
-                    return ResolvedStream(
-                        url = fullSrc,
+            // A. Video tag (<video src="..." /> or <source src="..." />)
+            val doc = Jsoup.parse(html)
+            val videoEl = doc.select("video source, video").firstOrNull()
+            if (videoEl != null) {
+                val src = videoEl.attr("src").trim()
+                if (src.isNotEmpty() && !src.startsWith("blob:")) {
+                    val fullSrc = resolveAbsoluteUrl(targetUrl, src)
+                    if (fullSrc.startsWith("http")) {
+                        val mediaType = detectMediaType(fullSrc, videoEl.attr("type"))
+                        return@use ResolvedStream(
+                            url = fullSrc,
+                            mediaType = mediaType,
+                            headers = headers,
+                            isDirectVideo = true,
+                            serverName = serverName,
+                            originalIframeUrl = targetUrl
+                        )
+                    }
+                }
+            }
+
+            // B. Blogger / Blogspot Video Config JSON
+            if (targetUrl.contains("blogger.com") || targetUrl.contains("blogspot.com") || html.contains("VIDEO_CONFIG")) {
+                val bloggerUrl = extractBloggerStream(html)
+                if (bloggerUrl.isNotEmpty()) {
+                    val fullBloggerUrl = resolveAbsoluteUrl(targetUrl, bloggerUrl)
+                    return@use ResolvedStream(
+                        url = fullBloggerUrl,
+                        mediaType = detectMediaTypeFromUrl(fullBloggerUrl),
+                        headers = headers,
+                        isDirectVideo = true,
+                        serverName = serverName,
+                        originalIframeUrl = targetUrl
+                    )
+                }
+            }
+
+            // C. Unpack Dean Edwards JavaScript `eval(function(p,a,c,k,e,d)...)`
+            val unpackedJs = unpackPackedJsIfAny(html)
+            val htmlToScan = if (unpackedJs.isNotEmpty()) "$html\n$unpackedJs" else html
+
+            // D. Regex matcher for absolute .m3u8 or .mp4 URLs (including escaped JSON \/ and URL encoded)
+            val m3u8Regex = Regex("""(https?(?::|\\/\\/)[^"'<>\s]+?\.(?:m3u8|mp4|mpd)(?:\?[^"'<>\s]*)?)""", RegexOption.IGNORE_CASE)
+            val matches = m3u8Regex.findAll(htmlToScan)
+            for (match in matches) {
+                var found = resolveAbsoluteUrl(targetUrl, match.value)
+                if (!found.contains("googleads") && !found.contains("analytics") && !found.contains("doubleclick")) {
+                    val mediaType = detectMediaTypeFromUrl(found)
+                    return@use ResolvedStream(
+                        url = found,
                         mediaType = mediaType,
                         headers = headers,
                         isDirectVideo = true,
@@ -180,36 +220,14 @@ object StreamResolver {
                     )
                 }
             }
-        }
 
-        // B. Blogger / Blogspot Video Config JSON
-        if (targetUrl.contains("blogger.com") || targetUrl.contains("blogspot.com") || html.contains("VIDEO_CONFIG")) {
-            val bloggerUrl = extractBloggerStream(html)
-            if (bloggerUrl.isNotEmpty()) {
-                return ResolvedStream(
-                    url = bloggerUrl,
-                    mediaType = detectMediaTypeFromUrl(bloggerUrl),
-                    headers = headers,
-                    isDirectVideo = true,
-                    serverName = serverName,
-                    originalIframeUrl = targetUrl
-                )
-            }
-        }
-
-        // C. Unpack Dean Edwards JavaScript `eval(function(p,a,c,k,e,d)...)`
-        val unpackedJs = unpackPackedJsIfAny(html)
-        val htmlToScan = if (unpackedJs.isNotEmpty()) "$html\n$unpackedJs" else html
-
-        // D. Regex matcher for .m3u8 or .mp4 URLs
-        val m3u8Regex = Regex("""(https?(?::|\\/\\/)[^"'<>\s]+?\.(?:m3u8|mp4)(?:\?[^"'<>\s]*)?)""", RegexOption.IGNORE_CASE)
-        val matches = m3u8Regex.findAll(htmlToScan)
-        for (match in matches) {
-            var found = match.value.replace("\\/", "/")
-            if (found.startsWith("//")) found = "https:$found"
-            if (!found.contains("googleads") && !found.contains("analytics") && !found.contains("doubleclick")) {
-                val mediaType = if (found.contains(".m3u8", ignoreCase = true)) StreamMediaType.HLS else StreamMediaType.MP4
-                return ResolvedStream(
+            // E. Regex matcher for `file:` or `sources:` in player configs (JWPlayer / Plyr / Clappr)
+            val fileRegex = Regex("""["']?(?:file|src|url)["']?\s*:\s*["']([^"']+\.(?:m3u8|mp4|mpd)[^"']*)["']""", RegexOption.IGNORE_CASE)
+            val fileMatch = fileRegex.find(htmlToScan)
+            if (fileMatch != null) {
+                val found = resolveAbsoluteUrl(targetUrl, fileMatch.groupValues[1])
+                val mediaType = detectMediaTypeFromUrl(found)
+                return@use ResolvedStream(
                     url = found,
                     mediaType = mediaType,
                     headers = headers,
@@ -218,26 +236,50 @@ object StreamResolver {
                     originalIframeUrl = targetUrl
                 )
             }
-        }
 
-        // E. Regex matcher for `file:` or `sources:` in player configs (JWPlayer / Plyr)
-        val fileRegex = Regex("""["']?file["']?\s*:\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE)
-        val fileMatch = fileRegex.find(htmlToScan)
-        if (fileMatch != null) {
-            var found = fileMatch.groupValues[1].replace("\\/", "/")
-            if (found.startsWith("//")) found = "https:$found"
-            val mediaType = if (found.contains(".m3u8", ignoreCase = true)) StreamMediaType.HLS else StreamMediaType.MP4
-            return ResolvedStream(
-                url = found,
-                mediaType = mediaType,
-                headers = headers,
-                isDirectVideo = true,
-                serverName = serverName,
-                originalIframeUrl = targetUrl
-            )
-        }
+            // F. Relative URL pattern e.g. "/stream/playlist.m3u8" or "../hls/master.m3u8"
+            val relativeRegex = Regex("""["']((?:/[a-zA-Z0-9_\-./]+|\.\./[a-zA-Z0-9_\-./]+)\.(?:m3u8|mp4|mpd)(?:\?[^"'<>\s]*)?)["']""", RegexOption.IGNORE_CASE)
+            val relativeMatch = relativeRegex.find(htmlToScan)
+            if (relativeMatch != null) {
+                val found = resolveAbsoluteUrl(targetUrl, relativeMatch.groupValues[1])
+                if (found.startsWith("http")) {
+                    val mediaType = detectMediaTypeFromUrl(found)
+                    return@use ResolvedStream(
+                        url = found,
+                        mediaType = mediaType,
+                        headers = headers,
+                        isDirectVideo = true,
+                        serverName = serverName,
+                        originalIframeUrl = targetUrl
+                    )
+                }
+            }
 
-        return null
+            null
+        }
+    }
+
+    private fun resolveAbsoluteUrl(baseUrl: String, candidate: String): String {
+        var clean = candidate.trim().replace("\\/", "/")
+        if (clean.startsWith("//")) return "https:$clean"
+        if (clean.startsWith("http://") || clean.startsWith("https://")) return clean
+
+        return try {
+            val baseUri = java.net.URI(baseUrl)
+            baseUri.resolve(clean).toString()
+        } catch (e: Exception) {
+            try {
+                val uri = Uri.parse(baseUrl)
+                val origin = if (uri.scheme != null && uri.host != null) "${uri.scheme}://${uri.host}" else ""
+                if (clean.startsWith("/") && origin.isNotEmpty()) {
+                    "$origin$clean"
+                } else {
+                    clean
+                }
+            } catch (ex: Exception) {
+                clean
+            }
+        }
     }
 
     private fun isObviousDirectStream(url: String): Boolean {

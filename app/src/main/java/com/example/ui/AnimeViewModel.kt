@@ -105,6 +105,7 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
     private val db = AppDatabase.getDatabase(application)
     private val repository = SavedAnimeRepository(db.savedAnimeDao())
     private val scheduleRepository = ScheduleRepository()
+    private val animeRepository: AnimeRepository = MultiSourceAnimeRepository()
 
     // Bookmark / Watchlist list
     private val _bookmarkedAnime = MutableStateFlow<List<ScrapedAnime>>(emptyList())
@@ -304,114 +305,26 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * Memfilter dan membuang duplikasi anime berdasarkan URL serta judul yang dinormalisasi.
-     */
-    private fun deduplicateAnimeList(list: List<ScrapedAnime>): List<ScrapedAnime> {
-        val result = mutableListOf<ScrapedAnime>()
-        val seenLinks = mutableSetOf<String>()
-        val seenTitleKeys = mutableSetOf<String>()
-
-        for (item in list) {
-            val cleanLink = item.link.trim().trimEnd('/')
-            if (cleanLink.isEmpty()) continue
-            if (seenLinks.contains(cleanLink)) continue
-
-            val rawTitle = item.title
-            val cleanTitle = rawTitle
-                .replace("[SVIP]", "", ignoreCase = true)
-                .replace("Sub Indo", "", ignoreCase = true)
-                .replace("Subtitle Indonesia", "", ignoreCase = true)
-                .trim()
-
-            // Normalized key without stripping season or numbers to avoid dropping different seasons/donghua
-            val titleKey = cleanTitle
-                .lowercase()
-                .replace(Regex("[^a-z0-9]"), "")
-                .trim()
-
-            if (titleKey.isNotEmpty() && seenTitleKeys.contains(titleKey)) {
-                continue
-            }
-
-            seenLinks.add(cleanLink)
-            if (titleKey.isNotEmpty()) {
-                seenTitleKeys.add(titleKey)
-            }
-            result.add(item.copy(title = cleanTitle.ifEmpty { rawTitle }, link = cleanLink))
-        }
-
-        return result
-    }
-
-    /**
-     * Menyelang-nyelingkan item dari beberapa scraper agar Anime & Donghua seimbang di posisi atas
-     */
-    private fun interleaveLists(vararg lists: List<ScrapedAnime>): List<ScrapedAnime> {
-        val result = mutableListOf<ScrapedAnime>()
-        val maxSize = lists.maxOfOrNull { it.size } ?: 0
-        for (i in 0 until maxSize) {
-            for (list in lists) {
-                if (i < list.size) {
-                    result.add(list[i])
-                }
-            }
-        }
-        return result
-    }
-
     fun refreshData() {
         viewModelScope.launch {
             try {
                 if (_latestUpdates.value !is UiState.Success) {
                     _latestUpdates.value = UiState.Loading
                 }
-                
-                val rawFastScraped = mutableListOf<ScrapedAnime>()
 
-                // PHASE 1: Fast initial load with independent per-scraper coroutines & timeouts
-                var s1 = emptyList<ScrapedAnime>()
-                var s2 = emptyList<ScrapedAnime>()
-                var s3 = emptyList<ScrapedAnime>()
-
-                kotlinx.coroutines.supervisorScope {
-                    val d1 = async { try { kotlinx.coroutines.withTimeoutOrNull(6000) { SamehadakuScraper.fetchLatestUpdates(1) } ?: emptyList() } catch (e: Exception) { emptyList() } }
-                    val d2 = async { try { kotlinx.coroutines.withTimeoutOrNull(6000) { AnichinScraper.fetchLatestUpdates(1) } ?: emptyList() } catch (e: Exception) { emptyList() } }
-                    val d3 = async { try { kotlinx.coroutines.withTimeoutOrNull(6000) { DonghubScraper.fetchLatestUpdates(1) } ?: emptyList() } catch (e: Exception) { emptyList() } }
-
-                    s1 = d1.await()
-                    s2 = d2.await()
-                    s3 = d3.await()
-                }
-
-                // Interleave agar Anime & Donghua berimbang di bagian atas
-                val fastInterleaved = interleaveLists(s1, s2, s3)
-                val fastCombined = deduplicateAnimeList(fastInterleaved)
+                // PHASE 1: Fast initial load via AnimeRepository
+                val fastCombined = animeRepository.getLatestUpdates(9000L)
 
                 if (fastCombined.isNotEmpty()) {
                     _latestUpdates.value = UiState.Success(fastCombined)
                     _trendingAnime.value = fastCombined.take(15).sortedByDescending { getViewCount(it.link) }
                 }
 
-                // PHASE 2: Silent background extension for page 2/3 & catalog
+                // PHASE 2: Silent background extension for page 2
                 viewModelScope.launch(Dispatchers.IO) {
                     try {
-                        var b1 = emptyList<ScrapedAnime>()
-                        var b2 = emptyList<ScrapedAnime>()
-                        var b3 = emptyList<ScrapedAnime>()
-
-                        kotlinx.coroutines.supervisorScope {
-                            val bg1 = async { try { kotlinx.coroutines.withTimeoutOrNull(8000) { SamehadakuScraper.fetchLatestUpdates(2) } ?: emptyList() } catch (e: Exception) { emptyList() } }
-                            val bg2 = async { try { kotlinx.coroutines.withTimeoutOrNull(8000) { AnichinScraper.fetchLatestUpdates(2) } ?: emptyList() } catch (e: Exception) { emptyList() } }
-                            val bg3 = async { try { kotlinx.coroutines.withTimeoutOrNull(8000) { DonghubScraper.fetchLatestUpdates(2) } ?: emptyList() } catch (e: Exception) { emptyList() } }
-
-                            b1 = bg1.await()
-                            b2 = bg2.await()
-                            b3 = bg3.await()
-                        }
-
-                        val fullInterleaved = interleaveLists(s1 + b1, s2 + b2, s3 + b3)
-                        val fullCombined = deduplicateAnimeList(fullInterleaved)
+                        val page2Combined = animeRepository.getPageUpdates(2, 12000L)
+                        val fullCombined = (fastCombined + page2Combined).distinctBy { it.link }
                         if (fullCombined.isNotEmpty()) {
                             _latestUpdates.value = UiState.Success(fullCombined)
                             _trendingAnime.value = fullCombined.take(20).sortedByDescending { getViewCount(it.link) }
@@ -425,7 +338,7 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
                     _latestUpdates.value = UiState.Error("Failed to fetch fresh data")
                 }
             } catch (e: Exception) {
-                android.util.Log.e("AnimeViewModel", "supervisorScope error", e)
+                android.util.Log.e("AnimeViewModel", "Repository error", e)
             }
         }
     }
@@ -433,7 +346,7 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
     private var searchJob: kotlinx.coroutines.Job? = null
 
     /**
-     * Search anime (Debounced)
+     * Search anime (Debounced) via AnimeRepository
      */
     fun performSearch(query: String) {
         _searchQuery.value = query
@@ -448,27 +361,7 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
             kotlinx.coroutines.delay(400) // Debounce delay
             _searchResults.value = UiState.Loading
             
-            val rawScraped = mutableListOf<ScrapedAnime>()
-            
-            try {
-                kotlinx.coroutines.supervisorScope {
-                    val d1 = async { try { SamehadakuScraper.searchAnime(query) } catch (e: Exception) { emptyList() } }
-                    val d2 = async { try { AnichinScraper.searchAnime(query) } catch (e: Exception) { emptyList() } }
-                    val d3 = async { try { DonghubScraper.searchAnime(query) } catch (e: Exception) { emptyList() } }
-                    
-                    val results = kotlinx.coroutines.withTimeoutOrNull(6000) {
-                        kotlinx.coroutines.awaitAll(d1, d2, d3)
-                    } ?: emptyList()
-
-                    for (res in results) {
-                        rawScraped.addAll(res)
-                    }
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("AnimeViewModel", "Search supervisorScope error", e)
-            }
-            
-            val combinedResults = deduplicateAnimeList(rawScraped)
+            val combinedResults = animeRepository.searchAnime(query, 6000L)
             
             if (combinedResults.isNotEmpty()) {
                 _searchResults.value = UiState.Success(combinedResults)
@@ -479,7 +372,7 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Show Anime detailed screen
+     * Show Anime detailed screen via AnimeRepository
      */
     fun selectAnime(url: String) {
         if (url.contains("myanimelist.net")) {
@@ -506,13 +399,7 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             _animeDetail.value = UiState.Loading
-            val details = kotlinx.coroutines.withTimeoutOrNull(20000) {
-                when {
-                    url.contains("anichin") -> AnichinScraper.fetchAnimeDetail(url)
-                    url.contains("donghub") -> DonghubScraper.fetchAnimeDetail(url)
-                    else -> SamehadakuScraper.fetchAnimeDetail(url)
-                }
-            }
+            val details = animeRepository.getAnimeDetail(url, 20000L)
             if (details != null && details.title.isNotEmpty() && details.title != "Title Missing") {
                 val finalDetails = if (details.episodes.isEmpty()) {
                     // Fallback episode if details is a movie or direct episode link
@@ -529,7 +416,7 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Show Episode streaming or downloading options
+     * Show Episode streaming or downloading options via AnimeRepository
      */
     fun selectEpisode(url: String) {
         _selectedEpisodeUrl.value = url
@@ -537,13 +424,7 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             _episodeDetail.value = UiState.Loading
-            val episodeDetails = kotlinx.coroutines.withTimeoutOrNull(20000) {
-                when {
-                    url.contains("anichin") -> AnichinScraper.fetchEpisodeDetail(url)
-                    url.contains("donghub") -> DonghubScraper.fetchEpisodeDetail(url)
-                    else -> SamehadakuScraper.fetchEpisodeDetail(url)
-                }
-            }
+            val episodeDetails = animeRepository.getEpisodeDetail(url, 20000L)
             if (episodeDetails != null && (episodeDetails.streamEmbeds.isNotEmpty() || episodeDetails.downloads.isNotEmpty())) {
                 _episodeDetail.value = UiState.Success(episodeDetails)
             } else {

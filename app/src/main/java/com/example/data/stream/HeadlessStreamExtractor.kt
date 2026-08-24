@@ -24,7 +24,7 @@ object HeadlessStreamExtractor {
     suspend fun extractMediaStream(
         context: Context,
         pageUrl: String,
-        timeoutMs: Long = 4500L
+        timeoutMs: Long = 7500L
     ): ResolvedStream? = withContext(Dispatchers.Main) {
         suspendCancellableCoroutine { continuation ->
             var isDone = false
@@ -63,6 +63,8 @@ object HeadlessStreamExtractor {
                         javaScriptEnabled = true
                         domStorageEnabled = true
                         databaseEnabled = false
+                        allowFileAccess = false
+                        allowContentAccess = false
                         mediaPlaybackRequiresUserGesture = false
                         userAgentString =
                             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
