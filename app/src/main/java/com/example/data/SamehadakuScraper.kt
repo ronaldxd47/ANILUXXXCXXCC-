@@ -2,6 +2,8 @@ package com.example.data
 
 import android.util.Log
 import android.content.Context
+import android.view.View
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.WebResourceRequest
@@ -301,6 +303,7 @@ object SamehadakuScraper {
     private suspend fun scrapeWithWebView(context: Context, url: String): String? = withContext(Dispatchers.Main) {
         val deferred = kotlinx.coroutines.CompletableDeferred<String?>()
         val webView = WebView(context)
+        webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
         
         webView.settings.apply {
             javaScriptEnabled = true
@@ -321,6 +324,18 @@ object SamehadakuScraper {
         var hasFinished = false
         
         webView.webViewClient = object : WebViewClient() {
+            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                Log.w(TAG, "Render process gone in Samehadaku scraper (didCrash=${detail?.didCrash()})")
+                if (!hasFinished) {
+                    hasFinished = true
+                    try {
+                        view?.destroy()
+                    } catch (e: Exception) {}
+                    deferred.complete(null)
+                }
+                return true
+            }
+
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 if (hasFinished) return

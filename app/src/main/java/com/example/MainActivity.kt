@@ -57,6 +57,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
+import android.webkit.RenderProcessGoneDetail
 import android.annotation.SuppressLint
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.pager.HorizontalPager
@@ -2626,6 +2627,19 @@ fun VideoPlayerWebView(
                             }
                         }
                     webViewClient = object : WebViewClient() {
+                        override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                            android.util.Log.w("VideoPlayerWebView", "Render process gone in VideoPlayerWebView (didCrash=${detail?.didCrash()})")
+                            try {
+                                view?.let {
+                                    it.stopLoading()
+                                    (it.parent as? android.view.ViewGroup)?.removeView(it)
+                                    it.destroy()
+                                }
+                            } catch (e: Exception) {}
+                            isLoading = false
+                            return true
+                        }
+
                         override fun onPageFinished(view: WebView?, url: String?) {
                             super.onPageFinished(view, url)
                             isLoading = false

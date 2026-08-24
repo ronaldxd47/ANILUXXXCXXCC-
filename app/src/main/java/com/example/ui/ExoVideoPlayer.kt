@@ -7,7 +7,9 @@ import android.content.pm.ActivityInfo
 import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.util.Log
+import android.view.View
 import android.view.ViewGroup
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -84,8 +86,8 @@ fun ExoVideoPlayer(
         mutableStateOf(embed?.serverName ?: "Server Default")
     }
     
-    // Player Lifecycle Manager
-    val playerManager = remember(context) { ExoPlayerLifecycleManager(context) }
+    // Player Lifecycle Manager (Singleton)
+    val playerManager = remember(context) { PlayerManager.getInstance(context) }
     var exoPlayer by remember { mutableStateOf<ExoPlayer?>(null) }
 
     // Resolve direct streaming URL from embed iframe
@@ -878,6 +880,19 @@ fun WebPlayerView(
                             return false
                         }
 
+                        override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                            Log.w("WebVideoPlayer", "Render process gone in WebVideoPlayer (didCrash=${detail?.didCrash()})")
+                            try {
+                                view?.let {
+                                    it.stopLoading()
+                                    (it.parent as? ViewGroup)?.removeView(it)
+                                    it.destroy()
+                                }
+                            } catch (e: Exception) {}
+                            isLoading = false
+                            return true
+                        }
+
                         override fun onPageFinished(view: WebView?, pageUrl: String?) {
                             super.onPageFinished(view, pageUrl)
                             isLoading = false
@@ -1067,12 +1082,26 @@ object HeadlessStreamExtractor {
 
                 try {
                     webView = WebView(context).apply {
+                        setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
                         settings.mediaPlaybackRequiresUserGesture = false
                         settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
                         webViewClient = object : WebViewClient() {
+                            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                                Log.w("HeadlessStreamExtractor", "Render process gone in HeadlessStreamExtractor (didCrash=${detail?.didCrash()})")
+                                if (continuation.isActive && !isDone) {
+                                    handler.post {
+                                        if (continuation.isActive && !isDone) {
+                                            cleanup()
+                                            continuation.resumeWith(Result.success(""))
+                                        }
+                                    }
+                                }
+                                return true
+                            }
+
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 super.onPageFinished(view, url)
                                 val autoPlayJs = """
