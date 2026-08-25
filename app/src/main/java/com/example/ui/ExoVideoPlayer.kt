@@ -93,6 +93,9 @@ fun ExoVideoPlayer(
     }
     var activeStreamUrl by remember(streamUrl) { mutableStateOf(streamUrl) }
     
+    // Anti-infinite loop flag: ensures auto-fallback triggers only ONCE per stream URL session
+    var hasAttemptedAutoFallback by remember(activeStreamUrl, currentServerName) { mutableStateOf(false) }
+
     // Player Lifecycle Manager (Singleton)
     val playerManager = remember(context) { PlayerManager.getInstance(context) }
     var exoPlayer by remember { mutableStateOf<ExoPlayer?>(null) }
@@ -171,15 +174,34 @@ fun ExoVideoPlayer(
                 }
                 override fun onPlayerError(error: PlaybackException) {
                     Log.w("ExoVideoPlayer", "Player error: [${error.errorCodeName}] ${error.message}")
+                    
+                    val causeMsg = error.cause?.message ?: ""
+                    val isFallbackCandidate = error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED ||
+                            error.errorCode == PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED ||
+                            error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
+                            error.errorCode == PlaybackException.ERROR_CODE_IO_UNSPECIFIED ||
+                            causeMsg.contains("Cannot find sync byte", ignoreCase = true)
+
+                    // Smart Fallback: trigger ONLY ONCE per stream URL session to avoid infinite loops
+                    if (isFallbackCandidate && !hasAttemptedAutoFallback) {
+                        Log.i("ExoVideoPlayer", "Smart Auto-Fallback triggered: ExoPlayer encountered protected/malformed stream [${error.errorCodeName}]. Switching to Web Engine...")
+                        hasAttemptedAutoFallback = true
+                        hasPlaybackError = false
+                        playbackErrorMessage = ""
+                        useNativeExo = false
+                        return
+                    }
+
+                    // If fallback was already attempted OR error is unrecoverable, display Error UI clearly
                     hasPlaybackError = true
                     playbackErrorMessage = when (error.errorCode) {
                         PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> "Server video menolak koneksi (HTTP 403/404)"
                         PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
                         PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "Koneksi jaringan internet terputus atau timeout"
                         PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
-                        PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED -> "Format HLS manifest tidak valid"
+                        PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED -> "Format stream / manifest HLS tidak dapat diputar"
                         PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
-                        PlaybackException.ERROR_CODE_DECODING_FAILED -> "Codec video perangkat tidak mendukung stream ini"
+                        PlaybackException.ERROR_CODE_DECODING_FAILED -> "Codec video perangkat tidak mendukung format ini"
                         else -> "Gagal memutar video: ${error.errorCodeName}"
                     }
                 }
@@ -265,6 +287,7 @@ fun ExoVideoPlayer(
                 AndroidView(
                     factory = { ctx ->
                         PlayerView(ctx).apply {
+                            setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                             useController = false
                             this.resizeMode = resizeMode
                             this.player = exoPlayer

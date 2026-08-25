@@ -1,0 +1,145 @@
+@Composable
+fun CatalogScreen(viewModel: AnimeViewModel) {
+    val alphabet = listOf("#") + ('A'..'Z').map { it.toString() }
+    val trailingAnime by viewModel.latestUpdates.collectAsState()
+    var selectedCategoryTab by remember { mutableStateOf("ALL") }
+    var selectedLetter by remember { mutableStateOf("#") }
+    
+    val catalogData = remember(trailingAnime, selectedCategoryTab, selectedLetter) {
+        if (trailingAnime is UiState.Success) {
+            val raw = (trailingAnime as UiState.Success).data
+            val byCategory = when (selectedCategoryTab) {
+                "ANIME" -> raw.filter { !it.link.contains("anichin") && !it.link.contains("donghub") && it.type != "Donghua" }
+                "DONGHUA" -> raw.filter { it.link.contains("anichin") || it.link.contains("donghub") || it.type == "Donghua" }
+                else -> raw
+            }
+            if (selectedLetter == "#") {
+                byCategory
+            } else {
+                byCategory.filter { it.title.startsWith(selectedLetter, ignoreCase = true) }
+            }
+        } else {
+            emptyList()
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Transparent)
+    ) {
+        Spacer(modifier = Modifier.statusBarsPadding())
+        
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "Katalog ",
+                    color = Color(0xFF00F2FE),
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = if (selectedLetter == "#") "A-Z" else "A-Z ($selectedLetter)",
+                    color = Color.White,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Row {
+                Icon(imageVector = Icons.Filled.Refresh, contentDescription = "Refresh", tint = Color(0xFF00F2FE), modifier = Modifier.clickable { viewModel.refreshData() })
+                Spacer(modifier = Modifier.width(16.dp))
+                Icon(imageVector = Icons.Filled.Search, contentDescription = "Search", tint = Color(0xFF00F2FE), modifier = Modifier.clickable { viewModel.navigateTo(Screen.Search) })
+            }
+        }
+
+        // Category Chips Bar
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            listOf(
+                "ALL" to "Semua",
+                "ANIME" to "🇯🇵 Anime",
+                "DONGHUA" to "🇨🇳 Donghua"
+            ).forEach { (key, label) ->
+                val isSelected = selectedCategoryTab == key
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(if (isSelected) Color(0xFF7000FF) else Color(0x33FFFFFF))
+                        .clickable { selectedCategoryTab = key }
+                        .padding(horizontal = 14.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = label,
+                        color = if (isSelected) Color.White else Color.LightGray,
+                        fontSize = 12.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                    )
+                }
+            }
+        }
+        
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+            Box(modifier = Modifier.weight(1f)) {
+                if (catalogData.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("Tidak ada konten ditemukan", color = Color.Gray, fontSize = 14.sp)
+                    }
+                } else {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(2),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        contentPadding = PaddingValues(start = 0.dp, top = 0.dp, end = 0.dp, bottom = 100.dp)
+                    ) {
+                        items(catalogData, key = { it.title + it.link }) { anime ->
+                            CompactAnimeCard(anime = anime, onClick = { viewModel.selectAnime(anime.link) })
+                        }
+                    }
+                }
+            }
+            
+            Spacer(modifier = Modifier.width(16.dp))
+            
+            androidx.compose.foundation.lazy.LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.width(40.dp).padding(bottom = 90.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                items(alphabet, key = { it }) { letter ->
+                    val isSelected = selectedLetter == letter
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .redGlass(
+                                backgroundColor = if (isSelected) Color(0x73FF3030) else Color(0x1F1A0202),
+                                borderColor = if (isSelected) Color(0xFFFF5252) else Color(0x3BFF3355),
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                            .clickable { selectedLetter = letter }
+                            .padding(vertical = 12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = letter,
+                            color = if (isSelected) Color.White else Color.LightGray,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+
