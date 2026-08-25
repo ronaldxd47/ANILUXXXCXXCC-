@@ -320,9 +320,7 @@ object StreamResolver {
             "User-Agent" to DEFAULT_USER_AGENT,
             "Referer" to targetUrl,
             "Origin" to domainOrigin,
-            "Accept" to "*/*",
-            "Sec-Fetch-Mode" to "cors",
-            "Sec-Fetch-Site" to "cross-site"
+            "Accept" to "*/*"
         )
     }
 

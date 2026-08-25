@@ -258,9 +258,16 @@ fun ExoVideoPlayer(
         ) {
             if (!useNativeExo || (resolvedStreamState != null && !resolvedStreamState!!.isDirect)) {
                 // Embedded Sandboxed Web Engine
+                val webUrl = if (resolvedStreamState != null && resolvedStreamState!!.isDirect && resolvedStreamState!!.url.isNotEmpty()) {
+                    resolvedStreamState!!.url
+                } else {
+                    resolvedStreamState?.originalIframeUrl ?: activeStreamUrl
+                }
                 WebPlayerView(
-                    url = resolvedStreamState?.originalIframeUrl ?: activeStreamUrl,
+                    url = webUrl,
                     title = title,
+                    headers = resolvedStreamState?.headers ?: emptyMap(),
+                    baseUrl = resolvedStreamState?.originalIframeUrl ?: resolvedStreamState?.headers?.get("Referer") ?: activeStreamUrl,
                     onBack = onBack,
                     onSwitchToExo = {
                         scope.launch {
@@ -283,11 +290,10 @@ fun ExoVideoPlayer(
                     isFullscreen = fullScreenMode
                 )
             } else {
-                // Native ExoPlayer Surface
+                // Native ExoPlayer Surface (Hardware Accelerated)
                 AndroidView(
                     factory = { ctx ->
                         PlayerView(ctx).apply {
-                            setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                             useController = false
                             this.resizeMode = resizeMode
                             this.player = exoPlayer
@@ -947,11 +953,28 @@ fun WebPlayerView(
     onOpenServerSelector: () -> Unit,
     onToggleFullscreen: () -> Unit,
     isFullscreen: Boolean,
+    headers: Map<String, String> = emptyMap(),
+    baseUrl: String? = null,
     modifier: Modifier = Modifier
 ) {
     var webViewInstance by remember { mutableStateOf<WebView?>(null) }
     var isLoading by remember(url) { mutableStateOf(true) }
     var loadProgress by remember(url) { mutableStateOf(0) }
+
+    DisposableEffect(url) {
+        onDispose {
+            try {
+                webViewInstance?.let { wv ->
+                    (wv.parent as? ViewGroup)?.removeView(wv)
+                    wv.onPause()
+                    wv.destroy()
+                }
+            } catch (e: Exception) {
+                Log.w("WebPlayerView", "Error disposing WebView: ${e.message}")
+            }
+            webViewInstance = null
+        }
+    }
 
     Box(
         modifier = modifier
@@ -961,7 +984,6 @@ fun WebPlayerView(
         AndroidView(
             factory = { ctx ->
                 WebView(ctx).apply {
-                    setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                     layoutParams = ViewGroup.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT
@@ -978,7 +1000,8 @@ fun WebPlayerView(
                         useWideViewPort = true
                         setSupportZoom(false)
                         mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                        userAgentString = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+                        userAgentString = headers["User-Agent"]
+                            ?: "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
                     }
                     
                     webChromeClient = object : WebChromeClient() {
@@ -994,12 +1017,11 @@ fun WebPlayerView(
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val targetUrl = request?.url?.toString() ?: ""
                             val lower = targetUrl.lowercase()
-                            // Smart blocking: Block obvious malicious app popups, schemes, deep links
+                            // Block external app intent navigation / non-http schemes
                             if (lower.startsWith("intent://") || lower.startsWith("market://") || 
                                 lower.startsWith("whatsapp://") || lower.startsWith("tg://") ||
-                                lower.contains("adsterra") || lower.contains("popcash") || 
-                                lower.contains("bet88") || lower.contains("slot88") || lower.contains("casino")) {
-                                return true // Block navigation
+                                lower.startsWith("about:blank")) {
+                                return true
                             }
                             return false
                         }
@@ -1007,13 +1029,13 @@ fun WebPlayerView(
                         override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
                             Log.w("WebVideoPlayer", "Render process gone in WebVideoPlayer (didCrash=${detail?.didCrash()})")
                             try {
-                                view?.let {
-                                    it.stopLoading()
-                                    (it.parent as? ViewGroup)?.removeView(it)
-                                    it.destroy()
+                                view?.let { wv ->
+                                    (wv.parent as? ViewGroup)?.removeView(wv)
+                                    wv.destroy()
                                 }
                             } catch (e: Exception) {}
                             isLoading = false
+                            webViewInstance = null
                             return true
                         }
 
@@ -1021,7 +1043,7 @@ fun WebPlayerView(
                             super.onPageFinished(view, pageUrl)
                             isLoading = false
                             
-                            // Inject CSS to make video/iframe fill the entire screen cleanly without outside clutter
+                            // Inject CSS to make video/iframe fill the entire screen cleanly
                             val injectScript = """
                                 (function() {
                                     try {
@@ -1045,8 +1067,9 @@ fun WebPlayerView(
                     var cleanUrl = url.trim()
                     if (cleanUrl.startsWith("//")) cleanUrl = "https:$cleanUrl"
                     
-                    // If the URL is a raw direct stream, generate a proper HTML5 player supporting both HLS and MP4
+                    // If the URL is a raw direct stream, generate a proper HTML5 player with pinned HLS.js and headers
                     if (cleanUrl.contains(".m3u8", ignoreCase = true)) {
+                        val headersJson = org.json.JSONObject(headers as Map<*, *>).toString()
                         val hlsHtml = """
                             <!DOCTYPE html>
                             <html>
@@ -1056,15 +1079,28 @@ fun WebPlayerView(
                                     html, body { margin:0; padding:0; width:100%; height:100%; background:#000; overflow:hidden; display:flex; justify-content:center; align-items:center; }
                                     video { width:100%; height:100%; object-fit:contain; }
                                 </style>
-                                <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+                                <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
                             </head>
                             <body>
                                 <video id="video" controls autoplay playsinline></video>
                                 <script>
                                     var video = document.getElementById('video');
                                     var videoSrc = '$cleanUrl';
+                                    var customHeaders = $headersJson;
                                     if (Hls.isSupported()) {
-                                        var hls = new Hls();
+                                        var hls = new Hls({
+                                            xhrSetup: function(xhr, url) {
+                                                xhr.withCredentials = false;
+                                                for (var k in customHeaders) {
+                                                    if (customHeaders.hasOwnProperty(k)) {
+                                                        var lk = k.toLowerCase();
+                                                        if (lk !== 'referer' && lk !== 'user-agent' && lk !== 'origin' && lk !== 'host') {
+                                                            try { xhr.setRequestHeader(k, customHeaders[k]); } catch(e){}
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        });
                                         hls.loadSource(videoSrc);
                                         hls.attachMedia(video);
                                         hls.on(Hls.Events.MANIFEST_PARSED, function() {
@@ -1080,9 +1116,26 @@ fun WebPlayerView(
                             </body>
                             </html>
                         """.trimIndent()
-                        loadDataWithBaseURL("https://anichin.vip", hlsHtml, "text/html", "UTF-8", null)
+
+                        val effectiveBaseUrl = when {
+                            !baseUrl.isNullOrBlank() && (baseUrl.startsWith("http://") || baseUrl.startsWith("https://")) -> baseUrl
+                            headers["Referer"] != null && headers["Referer"]!!.startsWith("http") -> headers["Referer"]!!
+                            headers["Origin"] != null && headers["Origin"]!!.startsWith("http") -> headers["Origin"]!!
+                            cleanUrl.startsWith("http") -> {
+                                try {
+                                    val uri = Uri.parse(cleanUrl)
+                                    if (uri.scheme != null && uri.host != null) "${uri.scheme}://${uri.host}" else cleanUrl
+                                } catch (e: Exception) { cleanUrl }
+                            }
+                            else -> "https://anichin.vip"
+                        }
+                        loadDataWithBaseURL(effectiveBaseUrl, hlsHtml, "text/html", "UTF-8", null)
                     } else {
-                        loadUrl(cleanUrl)
+                        if (headers.isNotEmpty()) {
+                            loadUrl(cleanUrl, headers)
+                        } else {
+                            loadUrl(cleanUrl)
+                        }
                     }
                     
                     webViewInstance = this

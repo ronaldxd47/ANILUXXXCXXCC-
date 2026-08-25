@@ -1554,7 +1554,6 @@ fun VideoPlayerWebView(
             AndroidView(
                 factory = { context ->
                     WebView(context).apply {
-                        setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
                         layoutParams = android.view.ViewGroup.LayoutParams(
                             android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                             android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -1596,10 +1595,9 @@ fun VideoPlayerWebView(
                         override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
                             android.util.Log.w("VideoPlayerWebView", "Render process gone in VideoPlayerWebView (didCrash=${detail?.didCrash()})")
                             try {
-                                view?.let {
-                                    it.stopLoading()
-                                    (it.parent as? android.view.ViewGroup)?.removeView(it)
-                                    it.destroy()
+                                view?.let { wv ->
+                                    (wv.parent as? android.view.ViewGroup)?.removeView(wv)
+                                    wv.destroy()
                                 }
                             } catch (e: Exception) {}
                             isLoading = false

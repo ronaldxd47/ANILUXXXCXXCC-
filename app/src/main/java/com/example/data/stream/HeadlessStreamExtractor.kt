@@ -58,7 +58,6 @@ object HeadlessStreamExtractor {
 
             try {
                 webView = WebView(context).apply {
-                    setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                     settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true

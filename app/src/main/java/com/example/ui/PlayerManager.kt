@@ -123,22 +123,31 @@ class PlayerManager private constructor(context: Context) {
 
         Log.d(TAG, "Initializing new ExoPlayer with custom headers: ${customHeaders.keys}")
 
-        // Step 2: Build HTTP DataSource with stream headers
+        // Step 2: Build HTTP DataSource with sanitized stream headers
+        val safeHeaders = mutableMapOf<String, String>()
+        safeHeaders["Accept"] = "*/*"
+        customHeaders.forEach { (key, value) ->
+            val k = key.trim()
+            val v = value.trim()
+            if (k.isNotEmpty() && v.isNotEmpty() &&
+                !k.startsWith("Sec-Fetch-", ignoreCase = true) &&
+                !k.equals("Host", ignoreCase = true) &&
+                !k.equals("Content-Length", ignoreCase = true) &&
+                !k.equals("User-Agent", ignoreCase = true)
+            ) {
+                safeHeaders[k] = v
+            }
+        }
+
+        val userAgent = customHeaders["User-Agent"]?.takeIf { it.isNotBlank() } ?: DEFAULT_USER_AGENT
+
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent(customHeaders["User-Agent"] ?: DEFAULT_USER_AGENT)
+            .setUserAgent(userAgent)
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(25000)
             .setReadTimeoutMs(25000)
             .setTransferListener(bandwidthMeter)
-            .setDefaultRequestProperties(
-                mutableMapOf(
-                    "Accept" to "*/*",
-                    "Sec-Fetch-Mode" to "cors",
-                    "Sec-Fetch-Site" to "cross-site"
-                ).apply {
-                    putAll(customHeaders)
-                }
-            )
+            .setDefaultRequestProperties(safeHeaders)
 
         val mediaSourceFactory = DefaultMediaSourceFactory(httpDataSourceFactory)
 
@@ -197,7 +206,7 @@ class PlayerManager private constructor(context: Context) {
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                Log.e(TAG, "ExoPlayer error (${error.errorCodeName}): ${error.message}", error)
+                Log.w(TAG, "ExoPlayer error (${error.errorCodeName}): ${error.message}")
                 _lastError.value = error
                 _isPlaying.value = false
                 _isBuffering.value = false

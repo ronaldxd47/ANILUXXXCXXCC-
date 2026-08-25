@@ -31,27 +31,46 @@ Aplikasi ini telah dioptimalkan secara mendalam dengan berbagai fungsionalitas c
 
 ## 🛠️ Arsitektur Sistem & Struktur Kode
 
-Aplikasi ini dirancang dengan prinsip **Clean Architecture & MVVM (Model-View-ViewModel)** yang fleksibel, memisahkan logika pengambilan data scraper, penyimpanan lokal, dan interaksi antarmuka (UI).
+Aplikasi ini dirancang dengan prinsip **Clean Architecture & MVVM (Model-View-ViewModel)** yang modular dan scalable, memisahkan logika pengambilan data scraper, resolver stream, penyimpanan lokal, serta antarmuka (UI).
 
 ```text
 app/src/main/java/com/example/
 ├── data/
-│   ├── AppDatabase.kt          <- Hub Room Database utama dengan konfigurasi SQLite.
-│   ├── SavedAnimeDao.kt        <- Akses Data (DAO) untuk fungsionalitas sejarah & favorit.
-│   ├── SavedAnimeRepository.kt  <- Abstraksi data layer / Service penyedia model terpadu.
-│   ├── SamehadakuScraper.kt    <- Scraper data anime cerdas.
-│   ├── AnichinScraper.kt       <- Scraper data donghua tipe satu.
-│   └── DonghubScraper.kt       <- Scraper data donghua tipe dua.
+│   ├── AppDatabase.kt          <- Basis data internal SQLite (Room DB).
+│   ├── SavedAnimeDao.kt        <- Data Access Object (DAO) untuk riwayat & bookmark.
+│   ├── SavedAnimeRepository.kt  <- Abstraksi data layer / Repository pattern terpadu.
+│   ├── SamehadakuScraper.kt    <- Scraper data provider anime.
+│   ├── AnichinScraper.kt       <- Scraper data provider donghua #1.
+│   ├── DonghubScraper.kt       <- Scraper data provider donghua #2.
+│   └── stream/
+│       ├── StreamResolver.kt    <- Extractor stream HLS (.m3u8), MP4, & resolver header.
+│       ├── HeadlessStreamExtractor.kt <- Dynamic headless sniffer via WebView background.
+│       └── ResolvedStream.kt   <- Value object stream beserta data header & media type.
 ├── ui/
-│   ├── AnimeViewModel.kt       <- Logika bisnis, pemrosesan Flow, pengelolaan asinkron.
-│   └── Screens.kt / Theme.kt   <- Tema visual merah-gelap "Red Glass" & Material 3.
-└── MainActivity.kt             <- Router navigasi utama, pemutar WebView, & EpisodeScreen.
+│   ├── AnimeViewModel.kt       <- Logika bisnis, pemrosesan Flow, state management.
+│   ├── PlayerManager.kt        <- Singleton ExoPlayer controller (Media3 lifecycle).
+│   ├── ExoVideoPlayer.kt       <- Dual-engine player (Native ExoPlayer + Web Fallback).
+│   ├── Theme.kt                <- Tema visual "Red Glass" & Material 3.
+│   ├── screens/                <- Layar modular (HomeScreen, DetailScreen, EpisodeScreen, SearchScreen, CatalogScreen, SavedScreen).
+│   └── components/             <- Komponen UI terpisah (BottomNav, AnimeCard, ServerSelector, CustomOverlay).
+└── MainActivity.kt             <- Router navigasi utama & penanganan orientation.
 ```
+
+---
+
+## 🎬 Dual-Engine Video Player & Smart Auto-Fallback
+
+Sistem pemutar video menggunakan pendekatan **Smart Dual-Engine**:
+1. **Primary (Native ExoPlayer / Media3)**: Dipakai untuk pemutaran stream direct HLS (`.m3u8`) / MP4 berkinerja tinggi dengan akselerasi perangkat keras (GPU).
+2. **Fallback (Web Engine / HLS.js v1.5.17)**: Berjalan otomatis jika ExoPlayer mengalami gangguan proteksi server (HTTP 403/401/429), `MALFORMED_MANIFEST`, atau respons challenge anti-bot.
+3. **Header Handoff & Referer Retention**: `StreamResolver` meneruskan header lengkap (`Referer`, `Origin`, `User-Agent`) secara presisi baik ke ExoPlayer `HttpDataSource` maupun ke `WebPlayerView` (`xhrSetup` + `loadDataWithBaseURL`).
+4. **Anti-Loop Session Guard**: Pemicu *fallback* diatur maksimal 1 kali per URL session streaming untuk mencegah *infinite loop*.
 
 ---
 
 ## 🛡️ Rencana Pengembangan & Persiapan Migrasi (Future Roadmap)
 
 - **Persiapan API Backend:** Seluruh fungsi Repository dan Service sudah ditulis dengan standar fungsi gantung (`suspend`) asinkron. Transisi penyimpanan lokal menuju API Fetch (Express.js / NestJS dengan database PostgreSQL/MongoDB) dapat dilakukan dengan mengganti lapisan Repository tanpa merusak visual atau logika ViewModel sedikit pun.
-- **HLS (m3u8) & Signed URL:** Rencana integrasi Exoplayer murni untuk mendukung streaming HLS berenkripsi tinggi untuk melindungi data video penayangan.
+- **HLS (m3u8) & Signed URL:** Mendukung streaming HLS berenkripsi tinggi untuk melindungi data video penayangan.
 - **Keamanan Token:** Pengalihan data sesi menggunakan HttpOnly Cookies setelah peluncuran layanan administrasi pengguna jarak jauh dilakukan.
+

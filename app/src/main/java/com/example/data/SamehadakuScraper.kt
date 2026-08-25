@@ -254,7 +254,6 @@ object SamehadakuScraper {
     private suspend fun scrapeWithWebView(context: Context, url: String): String? = withContext(Dispatchers.Main) {
         val deferred = kotlinx.coroutines.CompletableDeferred<String?>()
         val webView = WebView(context)
-        webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
         
         webView.settings.apply {
             javaScriptEnabled = true
