@@ -110,7 +110,7 @@ fun EpisodeScreen(viewModel: AnimeViewModel) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(230.dp)
+                            .aspectRatio(16f / 9f)
                             .clip(RoundedCornerShape(12.dp))
                             .background(Color.Black)
                             .border(1.dp, Color.White.copy(alpha = 0.05f), RoundedCornerShape(12.dp)),

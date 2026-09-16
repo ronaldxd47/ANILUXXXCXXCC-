@@ -92,6 +92,14 @@ import kotlinx.coroutines.delay
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        try {
+            val cacheJs = java.io.File(cacheDir, "WebView/Default/HTTP Cache/Code Cache/js")
+            if (!cacheJs.exists()) cacheJs.mkdirs()
+            val cacheWasm = java.io.File(cacheDir, "WebView/Default/HTTP Cache/Code Cache/wasm")
+            if (!cacheWasm.exists()) cacheWasm.mkdirs()
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "Failed creating WebView cache dirs: ${e.message}")
+        }
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {

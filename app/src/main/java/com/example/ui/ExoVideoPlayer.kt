@@ -135,6 +135,9 @@ fun ExoVideoPlayer(
     // Control States
     var showControls by remember { mutableStateOf(true) }
     var isLocked by remember { mutableStateOf(false) }
+    var isSeeking by remember { mutableStateOf(false) }
+    var controlsInteractionTrigger by remember { mutableLongStateOf(0L) }
+    val resetControlsTimer: () -> Unit = { controlsInteractionTrigger = System.currentTimeMillis() }
     var resizeMode by remember { mutableStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
     var currentQuality by remember { mutableStateOf("Auto") }
     var playbackSpeed by remember { mutableStateOf(1.0f) }
@@ -226,9 +229,9 @@ fun ExoVideoPlayer(
     }
 
     // Auto-hide controls ticker & live position tracker
-    LaunchedEffect(showControls, isPlayingState) {
-        if (showControls && isPlayingState && !isLocked) {
-            delay(4000)
+    LaunchedEffect(showControls, isPlayingState, isSeeking, controlsInteractionTrigger, isLocked) {
+        if (showControls && isPlayingState && !isLocked && !isSeeking) {
+            delay(3000)
             showControls = false
         }
     }
@@ -252,8 +255,7 @@ fun ExoVideoPlayer(
     ) {
         Box(
             modifier = modifier
-                .fillMaxWidth()
-                .aspectRatio(if (fullScreenMode) 16f / 9f else 16f / 9f)
+                .fillMaxSize()
                 .background(Color.Black)
         ) {
             if (!useNativeExo || (resolvedStreamState != null && !resolvedStreamState!!.isDirect)) {
@@ -309,12 +311,19 @@ fun ExoVideoPlayer(
                             view.player = exoPlayer
                         }
                     },
+                    onReset = { view ->
+                        view.player = null
+                    },
+                    onRelease = { view ->
+                        view.player = null
+                    },
                     modifier = Modifier
                         .fillMaxSize()
                         .pointerInput(Unit) {
                             detectTapGestures(
                                 onTap = {
                                     showControls = !showControls
+                                    if (showControls) resetControlsTimer()
                                 },
                                 onDoubleTap = { offset ->
                                     val width = size.width
@@ -324,6 +333,8 @@ fun ExoVideoPlayer(
                                         val newPos = (p.currentPosition + delta).coerceIn(0L, duration)
                                         p.seekTo(newPos)
                                         currentPosition = newPos
+                                        showControls = true
+                                        resetControlsTimer()
                                     }
                                 }
                             )
@@ -448,6 +459,13 @@ fun ExoVideoPlayer(
                                     )
                                 )
                             )
+                            .pointerInput(Unit) {
+                                detectTapGestures(
+                                    onTap = {
+                                        showControls = false
+                                    }
+                                )
+                            }
                     ) {
                         if (isLocked) {
                             // Locked State: Show only unlock button
@@ -476,76 +494,86 @@ fun ExoVideoPlayer(
                                                 listOf(Color.Black.copy(alpha = 0.85f), Color.Transparent)
                                             )
                                         )
-                                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                                        .padding(
+                                            horizontal = if (fullScreenMode) 14.dp else 10.dp,
+                                            vertical = if (fullScreenMode) 8.dp else 4.dp
+                                        ),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    IconButton(
-                                        onClick = onBack,
-                                        modifier = Modifier
-                                            .background(Color.White.copy(alpha = 0.15f), CircleShape)
-                                            .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                                            .size(36.dp)
-                                    ) {
-                                        Icon(imageVector = Icons.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(20.dp))
+                                    if (fullScreenMode) {
+                                        IconButton(
+                                            onClick = onBack,
+                                            modifier = Modifier
+                                                .background(Color.White.copy(alpha = 0.15f), CircleShape)
+                                                .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
+                                                .size(28.dp)
+                                        ) {
+                                            Icon(imageVector = Icons.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(15.dp))
+                                        }
+                                        Spacer(modifier = Modifier.width(8.dp))
                                     }
-                                    Spacer(modifier = Modifier.width(10.dp))
                                     
                                     val formattedEpTitle = remember(title) { FormatUtils.formatEpisodeTitle(title) }
                                     Text(
                                         text = formattedEpTitle,
                                         color = Color.White,
-                                        fontSize = 14.sp,
+                                        fontSize = if (fullScreenMode) 13.sp else 11.sp,
                                         fontWeight = FontWeight.Bold,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.weight(1f)
                                     )
                                     
-                                    // Quality / Speed Badge
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(Color.White.copy(alpha = 0.12f))
-                                            .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
-                                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                                    ) {
-                                        Text(text = if (bandwidthSpeedText.isNotEmpty()) bandwidthSpeedText else "HD", color = Color(0xFF00F2FE), fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                                    }
+                                    if (fullScreenMode) {
+                                        // Quality / Speed Badge
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(Color.White.copy(alpha = 0.12f))
+                                                .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
+                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(text = if (bandwidthSpeedText.isNotEmpty()) bandwidthSpeedText else "HD", color = Color(0xFF00F2FE), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                        }
 
-                                    Spacer(modifier = Modifier.width(6.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                    }
 
                                     // Switch to Web Engine
                                     Box(
                                         modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
+                                            .clip(RoundedCornerShape(6.dp))
                                             .background(Color.White.copy(alpha = 0.12f))
-                                            .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+                                            .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
                                             .clickable { useNativeExo = false }
-                                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
                                     ) {
-                                        Text("Web Player", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                                        Text("Web", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
                                     }
 
-                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
 
                                     IconButton(
                                         onClick = { showSettingsDialog = true },
                                         modifier = Modifier
                                             .background(Color.White.copy(alpha = 0.15f), CircleShape)
                                             .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                                            .size(36.dp)
+                                            .size(if (fullScreenMode) 28.dp else 24.dp)
                                     ) {
-                                        Icon(imageVector = Icons.Filled.Settings, contentDescription = "Settings", tint = Color.White, modifier = Modifier.size(18.dp))
+                                        Icon(imageVector = Icons.Filled.Settings, contentDescription = "Settings", tint = Color.White, modifier = Modifier.size(if (fullScreenMode) 15.dp else 13.dp))
                                     }
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    IconButton(
-                                        onClick = { isLocked = true },
-                                        modifier = Modifier
-                                            .background(Color.White.copy(alpha = 0.15f), CircleShape)
-                                            .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                                            .size(36.dp)
-                                    ) {
-                                        Icon(imageVector = Icons.Filled.LockOpen, contentDescription = "Lock", tint = Color.White, modifier = Modifier.size(18.dp))
+                                    
+                                    if (fullScreenMode) {
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        IconButton(
+                                            onClick = { isLocked = true },
+                                            modifier = Modifier
+                                                .background(Color.White.copy(alpha = 0.15f), CircleShape)
+                                                .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
+                                                .size(28.dp)
+                                        ) {
+                                            Icon(imageVector = Icons.Filled.LockOpen, contentDescription = "Lock", tint = Color.White, modifier = Modifier.size(15.dp))
+                                        }
                                     }
                                 }
                                 
@@ -553,18 +581,21 @@ fun ExoVideoPlayer(
                                 Row(
                                     modifier = Modifier.align(Alignment.CenterHorizontally),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(24.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(if (fullScreenMode) 14.dp else 10.dp)
                                 ) {
-                                    // Previous Episode (if available)
-                                    if (totalEpisodes > 1 && currentEpisodeIndex > 0) {
+                                    // Previous Episode (if available, fullscreen only)
+                                    if (fullScreenMode && totalEpisodes > 1 && currentEpisodeIndex > 0) {
                                         IconButton(
-                                            onClick = { onEpisodeChange(currentEpisodeIndex - 1) },
+                                            onClick = {
+                                                onEpisodeChange(currentEpisodeIndex - 1)
+                                                resetControlsTimer()
+                                            },
                                             modifier = Modifier
                                                 .background(Color.Black.copy(alpha = 0.5f), CircleShape)
                                                 .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                                                .size(38.dp)
+                                                .size(28.dp)
                                         ) {
-                                            Icon(imageVector = Icons.Filled.SkipPrevious, contentDescription = "Episode Sebelumnya", tint = Color.White, modifier = Modifier.size(22.dp))
+                                            Icon(imageVector = Icons.Filled.SkipPrevious, contentDescription = "Episode Sebelumnya", tint = Color.White, modifier = Modifier.size(15.dp))
                                         }
                                     }
 
@@ -575,13 +606,14 @@ fun ExoVideoPlayer(
                                             val target = (pos - 10000).coerceAtLeast(0)
                                             exoPlayer?.seekTo(target)
                                             currentPosition = target
+                                            resetControlsTimer()
                                         },
                                         modifier = Modifier
                                             .background(Color.Black.copy(alpha = 0.5f), CircleShape)
                                             .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                                            .size(46.dp)
+                                            .size(if (fullScreenMode) 32.dp else 26.dp)
                                     ) {
-                                        Icon(imageVector = Icons.Filled.Replay10, contentDescription = "Rewind 10s", tint = Color.White, modifier = Modifier.size(26.dp))
+                                        Icon(imageVector = Icons.Filled.Replay10, contentDescription = "Rewind 10s", tint = Color.White, modifier = Modifier.size(if (fullScreenMode) 16.dp else 14.dp))
                                     }
                                     
                                     // Play / Pause (Modern Radiant Accent)
@@ -596,6 +628,7 @@ fun ExoVideoPlayer(
                                                     isPlayingState = true
                                                 }
                                             }
+                                            resetControlsTimer()
                                         },
                                         modifier = Modifier
                                             .background(
@@ -605,13 +638,13 @@ fun ExoVideoPlayer(
                                                 CircleShape
                                             )
                                             .border(1.dp, Color.White.copy(alpha = 0.3f), CircleShape)
-                                            .size(60.dp)
+                                            .size(if (fullScreenMode) 40.dp else 34.dp)
                                     ) {
                                         Icon(
                                             imageVector = if (isPlayingState) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                                             contentDescription = "Play/Pause",
                                             tint = Color.White,
-                                            modifier = Modifier.size(34.dp)
+                                            modifier = Modifier.size(if (fullScreenMode) 22.dp else 18.dp)
                                         )
                                     }
                                     
@@ -622,25 +655,29 @@ fun ExoVideoPlayer(
                                             val target = (pos + 10000).coerceAtMost(duration)
                                             exoPlayer?.seekTo(target)
                                             currentPosition = target
+                                            resetControlsTimer()
                                         },
                                         modifier = Modifier
                                             .background(Color.Black.copy(alpha = 0.5f), CircleShape)
                                             .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                                            .size(46.dp)
+                                            .size(if (fullScreenMode) 32.dp else 26.dp)
                                     ) {
-                                        Icon(imageVector = Icons.Filled.Forward10, contentDescription = "Forward 10s", tint = Color.White, modifier = Modifier.size(26.dp))
+                                        Icon(imageVector = Icons.Filled.Forward10, contentDescription = "Forward 10s", tint = Color.White, modifier = Modifier.size(if (fullScreenMode) 16.dp else 14.dp))
                                     }
 
-                                    // Next Episode (if available)
-                                    if (totalEpisodes > 1 && currentEpisodeIndex < totalEpisodes - 1) {
+                                    // Next Episode (if available, fullscreen only)
+                                    if (fullScreenMode && totalEpisodes > 1 && currentEpisodeIndex < totalEpisodes - 1) {
                                         IconButton(
-                                            onClick = { onEpisodeChange(currentEpisodeIndex + 1) },
+                                            onClick = {
+                                                onEpisodeChange(currentEpisodeIndex + 1)
+                                                resetControlsTimer()
+                                            },
                                             modifier = Modifier
                                                 .background(Color.Black.copy(alpha = 0.5f), CircleShape)
                                                 .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                                                .size(38.dp)
+                                                .size(28.dp)
                                         ) {
-                                            Icon(imageVector = Icons.Filled.SkipNext, contentDescription = "Episode Selanjutnya", tint = Color.White, modifier = Modifier.size(22.dp))
+                                            Icon(imageVector = Icons.Filled.SkipNext, contentDescription = "Episode Selanjutnya", tint = Color.White, modifier = Modifier.size(15.dp))
                                         }
                                     }
                                 }
@@ -654,24 +691,30 @@ fun ExoVideoPlayer(
                                                 listOf(Color.Transparent, Color.Black.copy(alpha = 0.9f))
                                             )
                                         )
-                                        .padding(horizontal = 16.dp, vertical = 10.dp)
+                                        .padding(
+                                            horizontal = if (fullScreenMode) 14.dp else 8.dp,
+                                            vertical = if (fullScreenMode) 8.dp else 4.dp
+                                        )
                                 ) {
                                     // Custom Sleek Slider
                                     Slider(
                                         value = if (duration > 0) (currentPosition.toFloat() / duration).coerceIn(0f, 1f) else 0f,
                                         onValueChange = { frac ->
+                                            isSeeking = true
                                             val target = (frac * duration).toLong()
                                             currentPosition = target
                                         },
                                         onValueChangeFinished = {
                                             exoPlayer?.seekTo(currentPosition)
+                                            isSeeking = false
+                                            resetControlsTimer()
                                         },
                                         colors = SliderDefaults.colors(
                                             thumbColor = Color(0xFFE50914),
                                             activeTrackColor = Color(0xFFE50914),
                                             inactiveTrackColor = Color.White.copy(alpha = 0.25f)
                                         ),
-                                        modifier = Modifier.fillMaxWidth().height(18.dp)
+                                        modifier = Modifier.fillMaxWidth().height(if (fullScreenMode) 16.dp else 12.dp)
                                     )
                                     
                                     Row(
@@ -682,7 +725,7 @@ fun ExoVideoPlayer(
                                         Text(
                                             text = "${formatTime(currentPosition)} / ${formatTime(duration)}",
                                             color = Color.White,
-                                            fontSize = 12.sp,
+                                            fontSize = if (fullScreenMode) 11.sp else 9.sp,
                                             fontWeight = FontWeight.Medium
                                         )
                                         
@@ -690,9 +733,9 @@ fun ExoVideoPlayer(
                                             // Playback Speed quick pill
                                             Box(
                                                 modifier = Modifier
-                                                    .clip(RoundedCornerShape(6.dp))
+                                                    .clip(RoundedCornerShape(4.dp))
                                                     .background(Color.White.copy(alpha = 0.12f))
-                                                    .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
+                                                    .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(4.dp))
                                                     .clickable {
                                                         playbackSpeed = when (playbackSpeed) {
                                                             1.0f -> 1.25f
@@ -702,71 +745,78 @@ fun ExoVideoPlayer(
                                                             else -> 1.0f
                                                         }
                                                         exoPlayer?.setPlaybackSpeed(playbackSpeed)
+                                                        resetControlsTimer()
                                                     }
-                                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                                                    .padding(horizontal = 5.dp, vertical = 2.dp)
                                             ) {
-                                                Text(text = "${playbackSpeed}x", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                                Text(text = "${playbackSpeed}x", color = Color.White, fontSize = if (fullScreenMode) 10.sp else 8.sp, fontWeight = FontWeight.Bold)
                                             }
 
-                                            Spacer(modifier = Modifier.width(8.dp))
+                                            if (fullScreenMode) {
+                                                Spacer(modifier = Modifier.width(6.dp))
 
-                                            // Server selector
-                                            Box(
-                                                modifier = Modifier
-                                                    .clip(RoundedCornerShape(6.dp))
-                                                    .background(Color.White.copy(alpha = 0.12f))
-                                                    .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
-                                                    .clickable { showServerSelector = true }
-                                                    .padding(horizontal = 8.dp, vertical = 4.dp)
-                                            ) {
-                                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                                    Icon(imageVector = Icons.Filled.Dns, contentDescription = null, tint = Color(0xFFFFC107), modifier = Modifier.size(12.dp))
-                                                    Spacer(modifier = Modifier.width(4.dp))
-                                                    Text(text = currentServerName, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                                // Server selector
+                                                Box(
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(4.dp))
+                                                        .background(Color.White.copy(alpha = 0.12f))
+                                                        .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(4.dp))
+                                                        .clickable {
+                                                            showServerSelector = true
+                                                            resetControlsTimer()
+                                                        }
+                                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                ) {
+                                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                                        Icon(imageVector = Icons.Filled.Dns, contentDescription = null, tint = Color(0xFFFFC107), modifier = Modifier.size(10.dp))
+                                                        Spacer(modifier = Modifier.width(3.dp))
+                                                        Text(text = currentServerName, color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                                    }
+                                                }
+                                                
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                
+                                                // Aspect Ratio Toggle
+                                                IconButton(
+                                                    onClick = {
+                                                        resizeMode = when (resizeMode) {
+                                                            AspectRatioFrameLayout.RESIZE_MODE_FIT -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                                            AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+                                                            else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                                        }
+                                                        resetControlsTimer()
+                                                    },
+                                                    modifier = Modifier
+                                                        .background(Color.White.copy(alpha = 0.12f), CircleShape)
+                                                        .size(26.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = when (resizeMode) {
+                                                            AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> Icons.Filled.ZoomOutMap
+                                                            AspectRatioFrameLayout.RESIZE_MODE_FILL -> Icons.Filled.FitScreen
+                                                            else -> Icons.Filled.AspectRatio
+                                                        },
+                                                        contentDescription = "Aspect",
+                                                        tint = Color.White,
+                                                        modifier = Modifier.size(14.dp)
+                                                    )
                                                 }
                                             }
-                                            
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            
-                                            // Aspect Ratio Toggle
-                                            IconButton(
-                                                onClick = {
-                                                    resizeMode = when (resizeMode) {
-                                                        AspectRatioFrameLayout.RESIZE_MODE_FIT -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                                                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> AspectRatioFrameLayout.RESIZE_MODE_FILL
-                                                        else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
-                                                    }
-                                                },
-                                                modifier = Modifier
-                                                    .background(Color.White.copy(alpha = 0.12f), CircleShape)
-                                                    .size(32.dp)
-                                            ) {
-                                                Icon(
-                                                    imageVector = when (resizeMode) {
-                                                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> Icons.Filled.ZoomOutMap
-                                                        AspectRatioFrameLayout.RESIZE_MODE_FILL -> Icons.Filled.FitScreen
-                                                        else -> Icons.Filled.AspectRatio
-                                                    },
-                                                    contentDescription = "Aspect",
-                                                    tint = Color.White,
-                                                    modifier = Modifier.size(18.dp)
-                                                )
-                                            }
 
-                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
 
                                             // Fullscreen Toggle
                                             IconButton(
                                                 onClick = { isFullscreen = !isFullscreen },
                                                 modifier = Modifier
                                                     .background(Color.White.copy(alpha = 0.12f), CircleShape)
-                                                    .size(32.dp)
+                                                    .size(if (fullScreenMode) 26.dp else 22.dp)
                                             ) {
                                                 Icon(
                                                     imageVector = if (fullScreenMode) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
                                                     contentDescription = "Fullscreen",
                                                     tint = Color.White,
-                                                    modifier = Modifier.size(18.dp)
+                                                    modifier = Modifier.size(if (fullScreenMode) 14.dp else 13.dp)
                                                 )
                                             }
                                         }
@@ -798,7 +848,7 @@ fun ExoVideoPlayer(
                     controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 }
                 onDispose {
-                    activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                    activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
                     activity?.window?.let { win ->
                         val controller = WindowCompat.getInsetsController(win, win.decorView)
                         controller.show(WindowInsetsCompat.Type.systemBars())
@@ -965,6 +1015,18 @@ fun WebPlayerView(
         onDispose {
             try {
                 webViewInstance?.let { wv ->
+                    wv.evaluateJavascript(
+                        """
+                        (function() {
+                            try {
+                                if (window.hls) { window.hls.destroy(); window.hls = null; }
+                                var v = document.querySelector('video');
+                                if (v) { v.pause(); v.removeAttribute('src'); v.load(); }
+                            } catch(e){}
+                        })();
+                        """.trimIndent(), null
+                    )
+                    wv.stopLoading()
                     (wv.parent as? ViewGroup)?.removeView(wv)
                     wv.onPause()
                     wv.destroy()
@@ -1161,7 +1223,10 @@ fun WebPlayerView(
                         colors = listOf(Color.Black.copy(alpha = 0.85f), Color.Transparent)
                     )
                 )
-                .padding(horizontal = 12.dp, vertical = 8.dp)
+                .padding(
+                    horizontal = if (isFullscreen) 12.dp else 8.dp,
+                    vertical = if (isFullscreen) 8.dp else 4.dp
+                )
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1169,38 +1234,40 @@ fun WebPlayerView(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = onBack,
-                        modifier = Modifier
-                            .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                            .size(36.dp)
-                    ) {
-                        Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(20.dp))
+                    if (isFullscreen) {
+                        IconButton(
+                            onClick = onBack,
+                            modifier = Modifier
+                                .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                                .size(28.dp)
+                        ) {
+                            Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(15.dp))
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
                     Box(
                         modifier = Modifier
-                            .background(Color(0xFF00F2FE).copy(alpha = 0.2f), RoundedCornerShape(6.dp))
-                            .border(1.dp, Color(0xFF00F2FE).copy(alpha = 0.5f), RoundedCornerShape(6.dp))
-                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                            .background(Color(0xFF00F2FE).copy(alpha = 0.2f), RoundedCornerShape(4.dp))
+                            .border(0.5.dp, Color(0xFF00F2FE).copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
-                        Text("WEB ENGINE", color = Color(0xFF00F2FE), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        Text(if (isFullscreen) "WEB ENGINE" else "WEB", color = Color(0xFF00F2FE), fontSize = 8.sp, fontWeight = FontWeight.Bold)
                     }
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     // Switch to ExoPlayer button
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
+                            .clip(RoundedCornerShape(4.dp))
                             .background(Color(0xFF7000FF))
                             .clickable { onSwitchToExo() }
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                            .padding(horizontal = 6.dp, vertical = 3.dp)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.FlashOn, contentDescription = "Exo", tint = Color.White, modifier = Modifier.size(14.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("ExoPlayer", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            Icon(Icons.Filled.FlashOn, contentDescription = "Exo", tint = Color.White, modifier = Modifier.size(11.dp))
+                            Spacer(modifier = Modifier.width(2.dp))
+                            Text("Exo", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                         }
                     }
 
@@ -1209,19 +1276,21 @@ fun WebPlayerView(
                         onClick = { webViewInstance?.reload() },
                         modifier = Modifier
                             .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                            .size(36.dp)
+                            .size(if (isFullscreen) 28.dp else 22.dp)
                     ) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "Reload", tint = Color.White, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Filled.Refresh, contentDescription = "Reload", tint = Color.White, modifier = Modifier.size(if (isFullscreen) 15.dp else 12.dp))
                     }
 
-                    // Server switch button
-                    IconButton(
-                        onClick = onOpenServerSelector,
-                        modifier = Modifier
-                            .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                            .size(36.dp)
-                    ) {
-                        Icon(Icons.Filled.Dns, contentDescription = "Server", tint = Color(0xFFFFC107), modifier = Modifier.size(18.dp))
+                    if (isFullscreen) {
+                        // Server switch button
+                        IconButton(
+                            onClick = onOpenServerSelector,
+                            modifier = Modifier
+                                .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                                .size(28.dp)
+                        ) {
+                            Icon(Icons.Filled.Dns, contentDescription = "Server", tint = Color(0xFFFFC107), modifier = Modifier.size(15.dp))
+                        }
                     }
 
                     // Fullscreen toggle
@@ -1229,13 +1298,13 @@ fun WebPlayerView(
                         onClick = onToggleFullscreen,
                         modifier = Modifier
                             .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                            .size(36.dp)
+                            .size(if (isFullscreen) 28.dp else 22.dp)
                     ) {
                         Icon(
                             imageVector = if (isFullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
                             contentDescription = "Fullscreen",
                             tint = Color.White,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(if (isFullscreen) 15.dp else 13.dp)
                         )
                     }
                 }

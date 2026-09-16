@@ -88,6 +88,7 @@ object HeadlessStreamExtractor {
 
                         override fun onPageFinished(view: WebView?, url: String?) {
                             super.onPageFinished(view, url)
+                            if (isDone) return
                             // Trigger play buttons inside dynamic iframe player
                             val autoPlayJs = """
                                 (function() {

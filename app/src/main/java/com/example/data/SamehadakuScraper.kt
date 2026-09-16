@@ -258,7 +258,7 @@ object SamehadakuScraper {
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
-            databaseEnabled = true
+            databaseEnabled = false
             useWideViewPort = true
             loadWithOverviewMode = true
             userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -272,15 +272,27 @@ object SamehadakuScraper {
         }
         
         var hasFinished = false
+        val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+        fun cleanupWebView() {
+            if (hasFinished) return
+            hasFinished = true
+            try {
+                webView.stopLoading()
+                webView.loadUrl("about:blank")
+                webView.onPause()
+                webView.removeAllViews()
+                webView.destroy()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error destroying Samehadaku WebView: ${e.message}")
+            }
+        }
         
         webView.webViewClient = object : WebViewClient() {
             override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
                 Log.w(TAG, "Render process gone in Samehadaku scraper (didCrash=${detail?.didCrash()})")
                 if (!hasFinished) {
-                    hasFinished = true
-                    try {
-                        view?.destroy()
-                    } catch (e: Exception) {}
+                    cleanupWebView()
                     deferred.complete(null)
                 }
                 return true
@@ -321,49 +333,53 @@ object SamehadakuScraper {
                             })();
                         """.trimIndent()
                         
-                        webView.evaluateJavascript(jsCode) { statusResult ->
-                            if (hasFinished) return@evaluateJavascript
-                            
-                            val status = statusResult?.replace("\"", "") ?: "WAIT"
-                            val elapsed = System.currentTimeMillis() - startTime
-                            
-                            if (status == "READY_HTML") {
-                                webView.evaluateJavascript("document.documentElement.outerHTML") { rawHtml ->
-                                    if (hasFinished) return@evaluateJavascript
-                                    
-                                    var cleanHtml = ""
-                                    if (rawHtml != null && rawHtml.length >= 2 && rawHtml.startsWith("\"") && rawHtml.endsWith("\"")) {
-                                        try {
-                                            val parser = org.json.JSONTokener(rawHtml)
-                                            cleanHtml = parser.nextValue() as? String ?: ""
-                                        } catch (e: Exception) {
-                                            cleanHtml = rawHtml.removePrefix("\"").removeSuffix("\"")
-                                                .replace("\\u003C", "<").replace("\\u003E", ">")
-                                                .replace("\\\"", "\"").replace("\\\\", "\\")
+                        try {
+                            webView.evaluateJavascript(jsCode) { statusResult ->
+                                if (hasFinished) return@evaluateJavascript
+                                
+                                val status = statusResult?.replace("\"", "") ?: "WAIT"
+                                val elapsed = System.currentTimeMillis() - startTime
+                                
+                                if (status == "READY_HTML") {
+                                    try {
+                                        webView.evaluateJavascript("document.documentElement.outerHTML") { rawHtml ->
+                                            if (hasFinished) return@evaluateJavascript
+                                            
+                                            var cleanHtml = ""
+                                            if (rawHtml != null && rawHtml.length >= 2 && rawHtml.startsWith("\"") && rawHtml.endsWith("\"")) {
+                                                try {
+                                                    val parser = org.json.JSONTokener(rawHtml)
+                                                    cleanHtml = parser.nextValue() as? String ?: ""
+                                                } catch (e: Exception) {
+                                                    cleanHtml = rawHtml.removePrefix("\"").removeSuffix("\"")
+                                                        .replace("\\u003C", "<").replace("\\u003E", ">")
+                                                        .replace("\\\"", "\"").replace("\\\\", "\\")
+                                                }
+                                            } else {
+                                                cleanHtml = rawHtml ?: ""
+                                            }
+                                            
+                                            cleanupWebView()
+                                            deferred.complete(cleanHtml)
                                         }
-                                    } else {
-                                        cleanHtml = rawHtml ?: ""
+                                    } catch(e: Exception) {
+                                        cleanupWebView()
+                                        deferred.complete(null)
                                     }
-                                    
-                                    hasFinished = true
-                                    deferred.complete(cleanHtml)
-                                    android.os.Handler(android.os.Looper.getMainLooper()).post {
-                                        try { webView.destroy() } catch (e: Exception) {}
-                                    }
+                                } else if (elapsed > 15000) {
+                                    cleanupWebView()
+                                    deferred.complete(null)
+                                } else if (!hasFinished) {
+                                    mainHandler.postDelayed(this, 1000)
                                 }
-                            } else if (elapsed > 15000) {
-                                hasFinished = true
-                                deferred.complete(null)
-                                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                                    try { webView.destroy() } catch (e: Exception) {}
-                                }
-                            } else {
-                                webView.postDelayed(this, 1000)
                             }
+                        } catch(e: Exception) {
+                            cleanupWebView()
+                            deferred.complete(null)
                         }
                     }
                 }
-                webView.postDelayed(checkRunnable, 1000)
+                mainHandler.postDelayed(checkRunnable, 1000)
             }
             
             override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
@@ -378,12 +394,10 @@ object SamehadakuScraper {
         // Safety timeout of 20 seconds using Handler on Main thread
         val timeoutRunnable = Runnable {
             if (!hasFinished) {
-                hasFinished = true
-                try { webView.destroy() } catch (e: Exception) {}
+                cleanupWebView()
                 deferred.complete(null)
             }
         }
-        val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
         mainHandler.postDelayed(timeoutRunnable, 20000)
         
         deferred.await().also {

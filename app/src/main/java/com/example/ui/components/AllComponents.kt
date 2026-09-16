@@ -1502,6 +1502,34 @@ fun VideoPlayerWebView(
         }
     }
     var isLoading by remember(cleanUrl) { mutableStateOf(true) }
+    var webViewInstance by remember { mutableStateOf<WebView?>(null) }
+
+    DisposableEffect(cleanUrl) {
+        onDispose {
+            try {
+                webViewInstance?.let { wv ->
+                    wv.evaluateJavascript(
+                        """
+                        (function() {
+                            try {
+                                if (window.hls) { window.hls.destroy(); window.hls = null; }
+                                var v = document.querySelector('video');
+                                if (v) { v.pause(); v.removeAttribute('src'); v.load(); }
+                            } catch(e){}
+                        })();
+                        """.trimIndent(), null
+                    )
+                    wv.stopLoading()
+                    (wv.parent as? android.view.ViewGroup)?.removeView(wv)
+                    wv.onPause()
+                    wv.destroy()
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("VideoPlayerWebView", "Error disposing WebView in AllComponents: ${e.message}")
+            }
+            webViewInstance = null
+        }
+    }
 
     // For Fullscreen Video
     var isFullscreen by remember { mutableStateOf(false) }
@@ -1714,6 +1742,7 @@ fun VideoPlayerWebView(
                     } else {
                         loadUrl(cleanUrl)
                     }
+                    webViewInstance = this
                 }
             },
             update = { webView ->
@@ -1746,6 +1775,43 @@ fun VideoPlayerWebView(
                         webView.loadUrl(cleanUrl)
                     }
                 }
+            },
+            onReset = { webView ->
+                try {
+                    webView.evaluateJavascript(
+                        """
+                        (function() {
+                            try {
+                                if (window.hls) { window.hls.destroy(); window.hls = null; }
+                                var v = document.querySelector('video');
+                                if (v) { v.pause(); v.removeAttribute('src'); v.load(); }
+                            } catch(e){}
+                        })();
+                        """.trimIndent(), null
+                    )
+                    webView.stopLoading()
+                    webView.onPause()
+                } catch (e: Exception) {}
+            },
+            onRelease = { webView ->
+                try {
+                    webView.evaluateJavascript(
+                        """
+                        (function() {
+                            try {
+                                if (window.hls) { window.hls.destroy(); window.hls = null; }
+                                var v = document.querySelector('video');
+                                if (v) { v.pause(); v.removeAttribute('src'); v.load(); }
+                            } catch(e){}
+                        })();
+                        """.trimIndent(), null
+                    )
+                    webView.stopLoading()
+                    (webView.parent as? android.view.ViewGroup)?.removeView(webView)
+                    webView.onPause()
+                    webView.destroy()
+                } catch (e: Exception) {}
+                webViewInstance = null
             },
             modifier = Modifier.fillMaxSize()
         )
