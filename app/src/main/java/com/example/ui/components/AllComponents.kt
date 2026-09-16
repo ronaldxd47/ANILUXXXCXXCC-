@@ -1508,21 +1508,17 @@ fun VideoPlayerWebView(
         onDispose {
             try {
                 webViewInstance?.let { wv ->
-                    wv.evaluateJavascript(
-                        """
-                        (function() {
-                            try {
-                                if (window.hls) { window.hls.destroy(); window.hls = null; }
-                                var v = document.querySelector('video');
-                                if (v) { v.pause(); v.removeAttribute('src'); v.load(); }
-                            } catch(e){}
-                        })();
-                        """.trimIndent(), null
-                    )
+                    webViewInstance = null
                     wv.stopLoading()
+                    wv.webChromeClient = null
+                    wv.webViewClient = object : WebViewClient() {}
                     (wv.parent as? android.view.ViewGroup)?.removeView(wv)
                     wv.onPause()
-                    wv.destroy()
+                    wv.postDelayed({
+                        try {
+                            wv.destroy()
+                        } catch (e: Exception) {}
+                    }, 200)
                 }
             } catch (e: Exception) {
                 android.util.Log.w("VideoPlayerWebView", "Error disposing WebView in AllComponents: ${e.message}")
@@ -1795,21 +1791,16 @@ fun VideoPlayerWebView(
             },
             onRelease = { webView ->
                 try {
-                    webView.evaluateJavascript(
-                        """
-                        (function() {
-                            try {
-                                if (window.hls) { window.hls.destroy(); window.hls = null; }
-                                var v = document.querySelector('video');
-                                if (v) { v.pause(); v.removeAttribute('src'); v.load(); }
-                            } catch(e){}
-                        })();
-                        """.trimIndent(), null
-                    )
                     webView.stopLoading()
+                    webView.webChromeClient = null
+                    webView.webViewClient = object : WebViewClient() {}
                     (webView.parent as? android.view.ViewGroup)?.removeView(webView)
                     webView.onPause()
-                    webView.destroy()
+                    webView.postDelayed({
+                        try {
+                            webView.destroy()
+                        } catch (e: Exception) {}
+                    }, 200)
                 } catch (e: Exception) {}
                 webViewInstance = null
             },

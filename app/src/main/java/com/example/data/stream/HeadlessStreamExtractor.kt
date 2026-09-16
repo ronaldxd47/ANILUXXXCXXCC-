@@ -8,6 +8,7 @@ import android.view.View
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import kotlinx.coroutines.Dispatchers
@@ -35,16 +36,23 @@ object HeadlessStreamExtractor {
                 if (!isDone) {
                     isDone = true
                     handler.removeCallbacksAndMessages(null)
-                    try {
-                        webView?.stopLoading()
-                        webView?.loadUrl("about:blank")
-                        webView?.onPause()
-                        webView?.removeAllViews()
-                        webView?.destroy()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "WebView cleanup error: ${e.message}")
-                    }
+                    val wv = webView
                     webView = null
+                    if (wv != null) {
+                        try {
+                            wv.stopLoading()
+                            wv.webChromeClient = null
+                            wv.webViewClient = object : WebViewClient() {}
+                            wv.onPause()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "WebView pause error: ${e.message}")
+                        }
+                        handler.postDelayed({
+                            try {
+                                wv.destroy()
+                            } catch (e: Exception) {}
+                        }, 300)
+                    }
                 }
             }
 
@@ -58,13 +66,15 @@ object HeadlessStreamExtractor {
 
             try {
                 webView = WebView(context).apply {
+                    setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                     settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
-                        databaseEnabled = false
+                        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                         allowFileAccess = false
                         allowContentAccess = false
-                        mediaPlaybackRequiresUserGesture = false
+                        blockNetworkImage = true
+                        mediaPlaybackRequiresUserGesture = true
                         userAgentString =
                             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                     }
@@ -89,18 +99,44 @@ object HeadlessStreamExtractor {
                         override fun onPageFinished(view: WebView?, url: String?) {
                             super.onPageFinished(view, url)
                             if (isDone) return
-                            // Trigger play buttons inside dynamic iframe player
+                            // Trigger play buttons inside dynamic iframe player safely without hardware media decoding
                             val autoPlayJs = """
                                 (function() {
                                     try {
                                         var playBtns = document.querySelectorAll('.jw-video, .jw-button-color, .plyr__control--overlaid, .vjs-big-play-button, .play-button, [aria-label="Play"], #player, iframe, .video-js');
                                         playBtns.forEach(function(btn) { btn.click(); });
                                         var v = document.querySelector('video');
-                                        if (v) { v.play().catch(function(e){}); }
+                                        if (v) {
+                                            v.muted = true;
+                                            return v.src || (v.querySelector('source') ? v.querySelector('source').src : '');
+                                        }
                                     } catch(e){}
+                                    return '';
                                 })();
                             """.trimIndent()
-                            view?.evaluateJavascript(autoPlayJs, null)
+                            view?.evaluateJavascript(autoPlayJs) { rawSrc ->
+                                val directSrc = rawSrc?.replace("\"", "")?.trim() ?: ""
+                                if (directSrc.isNotEmpty() && isMediaStreamUrl(directSrc) && continuation.isActive && !isDone) {
+                                    val streamMediaType = when {
+                                        directSrc.contains(".m3u8", ignoreCase = true) -> StreamMediaType.HLS
+                                        directSrc.contains(".mpd", ignoreCase = true) -> StreamMediaType.DASH
+                                        else -> StreamMediaType.MP4
+                                    }
+                                    val resolved = ResolvedStream(
+                                        url = directSrc,
+                                        mediaType = streamMediaType,
+                                        headers = mapOf("Referer" to pageUrl, "User-Agent" to (settings.userAgentString ?: "")),
+                                        isDirectVideo = true,
+                                        originalIframeUrl = pageUrl
+                                    )
+                                    handler.post {
+                                        if (continuation.isActive && !isDone) {
+                                            cleanup()
+                                            continuation.resumeWith(Result.success(resolved))
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         override fun shouldInterceptRequest(
@@ -118,11 +154,19 @@ object HeadlessStreamExtractor {
                                         else -> StreamMediaType.MP4
                                     }
 
+                                    // Extract session cookies from both request headers and system CookieManager
+                                    val cookieManager = android.webkit.CookieManager.getInstance()
+                                    val sysCookies = cookieManager.getCookie(reqUrl) ?: cookieManager.getCookie(pageUrl) ?: ""
+                                    val effectiveCookies = headers["Cookie"] ?: sysCookies
+
                                     val resolvedHeaders = HashMap<String, String>().apply {
                                         put("Referer", headers["Referer"] ?: pageUrl)
                                         put("Origin", headers["Origin"] ?: getOrigin(pageUrl))
                                         put("User-Agent", headers["User-Agent"] ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-                                        headers["Cookie"]?.let { put("Cookie", it) }
+                                        if (effectiveCookies.isNotBlank()) {
+                                            put("Cookie", effectiveCookies)
+                                        }
+                                        put("Accept", "*/*")
                                     }
 
                                     val resolved = ResolvedStream(

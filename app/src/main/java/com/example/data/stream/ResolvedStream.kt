@@ -22,7 +22,10 @@ data class ResolvedStream(
     val isDirectVideo: Boolean = false,
     val serverName: String = "",
     val originalIframeUrl: String = "",
-    val quality: String = "Auto"
+    val quality: String = "Auto",
+    val contentType: String = "",
+    val isValidated: Boolean = false,
+    val resolvedTimestamp: Long = System.currentTimeMillis()
 ) {
     val isHls: Boolean
         get() = mediaType == StreamMediaType.HLS || url.lowercase().contains(".m3u8")

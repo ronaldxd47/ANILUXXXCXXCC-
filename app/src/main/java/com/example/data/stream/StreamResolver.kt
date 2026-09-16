@@ -73,26 +73,39 @@ object StreamResolver {
             )
         }
 
-        // 2. Direct extension check (Fast path)
+        // 2. Direct extension check (Fast path with validation)
         val defaultHeaders = createStandardHeaders(cleanUrl)
         if (isObviousDirectStream(cleanUrl)) {
-            val mediaType = detectMediaTypeFromUrl(cleanUrl)
-            return@withContext ResolvedStream(
-                url = cleanUrl,
-                mediaType = mediaType,
-                headers = defaultHeaders,
-                isDirectVideo = true,
-                serverName = serverName,
-                originalIframeUrl = cleanUrl
-            )
+            val validation = StreamValidator.validateStream(cleanUrl, defaultHeaders)
+            if (validation is StreamValidator.ValidationResult.Valid) {
+                return@withContext ResolvedStream(
+                    url = cleanUrl,
+                    mediaType = validation.mediaType,
+                    contentType = validation.contentType,
+                    headers = defaultHeaders,
+                    isDirectVideo = true,
+                    serverName = serverName,
+                    originalIframeUrl = cleanUrl,
+                    isValidated = true
+                )
+            }
         }
 
-        // 3. Static HTTP GET & HTML/JavaScript parsing
+        // 3. Static HTTP GET & HTML/JavaScript parsing with stream validation
         try {
-            val staticResult = resolveStaticStream(cleanUrl, serverName)
-            if (staticResult != null) {
-                Log.d(TAG, "Static stream extraction succeeded: ${staticResult.url}")
-                return@withContext staticResult
+            val staticCandidate = resolveStaticStream(cleanUrl, serverName)
+            if (staticCandidate != null && staticCandidate.url.isNotEmpty()) {
+                val validation = StreamValidator.validateStream(staticCandidate.url, staticCandidate.headers)
+                if (validation is StreamValidator.ValidationResult.Valid) {
+                    Log.d(TAG, "Static stream validated successfully: ${staticCandidate.url} (${validation.mediaType})")
+                    return@withContext staticCandidate.copy(
+                        mediaType = validation.mediaType,
+                        contentType = validation.contentType,
+                        isValidated = true
+                    )
+                } else {
+                    Log.w(TAG, "Static candidate failed validation: ${staticCandidate.url}")
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Static stream parsing failed for $cleanUrl: ${e.message}")
@@ -102,8 +115,21 @@ object StreamResolver {
         try {
             val dynamicStream = HeadlessStreamExtractor.extractMediaStream(context, cleanUrl)
             if (dynamicStream != null && dynamicStream.url.isNotEmpty()) {
-                Log.d(TAG, "Headless dynamic extraction succeeded: ${dynamicStream.url}")
-                return@withContext dynamicStream.copy(serverName = serverName)
+                val validation = StreamValidator.validateStream(dynamicStream.url, dynamicStream.headers)
+                if (validation is StreamValidator.ValidationResult.Valid) {
+                    Log.d(TAG, "Headless dynamic stream validated: ${dynamicStream.url}")
+                    return@withContext dynamicStream.copy(
+                        serverName = serverName,
+                        mediaType = validation.mediaType,
+                        contentType = validation.contentType,
+                        isValidated = true
+                    )
+                } else if (validation is StreamValidator.ValidationResult.Invalid && validation.reason.contains("HTML web page", ignoreCase = true)) {
+                    Log.w(TAG, "Headless candidate returned HTML error page, delegating to Web Sandbox: ${dynamicStream.url}")
+                } else {
+                    Log.d(TAG, "Headless candidate passed through as direct: ${dynamicStream.url}")
+                    return@withContext dynamicStream.copy(serverName = serverName, isValidated = false)
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Headless extraction exception: ${e.message}")

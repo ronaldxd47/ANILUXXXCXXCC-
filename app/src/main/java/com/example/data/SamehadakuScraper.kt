@@ -254,11 +254,12 @@ object SamehadakuScraper {
     private suspend fun scrapeWithWebView(context: Context, url: String): String? = withContext(Dispatchers.Main) {
         val deferred = kotlinx.coroutines.CompletableDeferred<String?>()
         val webView = WebView(context)
+        webView.setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
         
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
-            databaseEnabled = false
+            blockNetworkImage = true
             useWideViewPort = true
             loadWithOverviewMode = true
             userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -278,11 +279,16 @@ object SamehadakuScraper {
             if (hasFinished) return
             hasFinished = true
             try {
+                mainHandler.removeCallbacksAndMessages(null)
                 webView.stopLoading()
-                webView.loadUrl("about:blank")
+                webView.webChromeClient = null
+                webView.webViewClient = object : WebViewClient() {}
                 webView.onPause()
-                webView.removeAllViews()
-                webView.destroy()
+                mainHandler.postDelayed({
+                    try {
+                        webView.destroy()
+                    } catch (e: Exception) {}
+                }, 300)
             } catch (e: Exception) {
                 Log.w(TAG, "Error destroying Samehadaku WebView: ${e.message}")
             }

@@ -1,22 +1,75 @@
-Title: Samehadaku - Nonton Streaming Anime Sub Indo
-HTML Size: 132221
-Found 0 schedule containers
+Title: Jadwal Rilis – Samehadaku
+HTML Size: 63035
+Found 2 schedule containers
+[0] Tag: div, Class: widget schedule pagess, ID: 
+Snippet: <div class="widget schedule pagess">
+ <div class="content schedule post-show">
+  <div id="the-days">
+   <ul>
+    <li>
+     <div id="player-option-1" class="east_days_option on" data-type="schtml" data-day="monday">
+      <span>Senin</span>
+     </div></li>
+    <li>
+     <div id="player-option-2" class="east_days_option " data-type="schtml" data-day="tuesday">
+      <span>Selasa</span>
+     </div></li>
+    <li>
+     <div id="player-option-3" class="east_days_option " data-type="schtml" data-day="...
+
+[1] Tag: div, Class: content schedule post-show, ID: 
+Snippet: <div class="content schedule post-show">
+ <div id="the-days">
+  <ul>
+   <li>
+    <div id="player-option-1" class="east_days_option on" data-type="schtml" data-day="monday">
+     <span>Senin</span>
+    </div></li>
+   <li>
+    <div id="player-option-2" class="east_days_option " data-type="schtml" data-day="tuesday">
+     <span>Selasa</span>
+    </div></li>
+   <li>
+    <div id="player-option-3" class="east_days_option " data-type="schtml" data-day="wednesday">
+     <span>Rabu</span>
+    </div></li>...
+
 Class '.schedule-card': 0 elements
-Class '.schedule': 0 elements
+Class '.schedule': 2 elements
+  - Tag: div, Class: widget schedule pagess, Text: Senin Selasa Rabu Kamis Jumaat Sabtu Minggu TV 8.73 One Piece Action, Adventure 00:00 TV 6.8 Kuroneko to Majo no Kyoushitsu Comedy, Fantasy 01:00 TV 8
+  - Tag: div, Class: content schedule post-show, Text: Senin Selasa Rabu Kamis Jumaat Sabtu Minggu TV 8.73 One Piece Action, Adventure 00:00 TV 6.8 Kuroneko to Majo no Kyoushitsu Comedy, Fantasy 01:00 TV 8
 Class '.tab-content': 0 elements
 Class '.schedule-tab': 0 elements
 Class '.sc-day': 0 elements
 Class '.days': 0 elements
 Class '.day': 0 elements
 Class '.schedule-day': 0 elements
-Containing 'Senin': 0 elements
-Containing 'Selasa': 0 elements
-Containing 'Rabu': 0 elements
-Containing 'Kamis': 0 elements
+Containing 'Senin': 15 elements
+  - Tag: #root, Class: , Text: Jadwal Rilis – Samehadaku <a href="/" target="_blank"><img src="//sstatic1.histats.com/0.gif?4389157
+  - Tag: html, Class: , Text: Jadwal Rilis – Samehadaku <a href="/" target="_blank"><img src="//sstatic1.histats.com/0.gif?4389157
+  - Tag: body, Class: wp-singular page-template page-template-pages page-template-page-schedule-old page-template-pagespage-schedule-old-php page page-id-80 wp-theme-eastplaydipake1aaa bodyclass, Text: Samehadaku - Nonton Streaming Anime Sub Indo / Samehadaku - Nonton Streaming Anime Sub Indo / Anime 
+Containing 'Selasa': 15 elements
+  - Tag: #root, Class: , Text: Jadwal Rilis – Samehadaku <a href="/" target="_blank"><img src="//sstatic1.histats.com/0.gif?4389157
+  - Tag: html, Class: , Text: Jadwal Rilis – Samehadaku <a href="/" target="_blank"><img src="//sstatic1.histats.com/0.gif?4389157
+  - Tag: body, Class: wp-singular page-template page-template-pages page-template-page-schedule-old page-template-pagespage-schedule-old-php page page-id-80 wp-theme-eastplaydipake1aaa bodyclass, Text: Samehadaku - Nonton Streaming Anime Sub Indo / Samehadaku - Nonton Streaming Anime Sub Indo / Anime 
+Containing 'Rabu': 15 elements
+  - Tag: #root, Class: , Text: Jadwal Rilis – Samehadaku <a href="/" target="_blank"><img src="//sstatic1.histats.com/0.gif?4389157
+  - Tag: html, Class: , Text: Jadwal Rilis – Samehadaku <a href="/" target="_blank"><img src="//sstatic1.histats.com/0.gif?4389157
+  - Tag: body, Class: wp-singular page-template page-template-pages page-template-page-schedule-old page-template-pagespage-schedule-old-php page page-id-80 wp-theme-eastplaydipake1aaa bodyclass, Text: Samehadaku - Nonton Streaming Anime Sub Indo / Samehadaku - Nonton Streaming Anime Sub Indo / Anime 
+Containing 'Kamis': 15 elements
+  - Tag: #root, Class: , Text: Jadwal Rilis – Samehadaku <a href="/" target="_blank"><img src="//sstatic1.histats.com/0.gif?4389157
+  - Tag: html, Class: , Text: Jadwal Rilis – Samehadaku <a href="/" target="_blank"><img src="//sstatic1.histats.com/0.gif?4389157
+  - Tag: body, Class: wp-singular page-template page-template-pages page-template-page-schedule-old page-template-pagespage-schedule-old-php page page-id-80 wp-theme-eastplaydipake1aaa bodyclass, Text: Samehadaku - Nonton Streaming Anime Sub Indo / Samehadaku - Nonton Streaming Anime Sub Indo / Anime 
 Containing 'Jumat': 0 elements
-Containing 'Sabtu': 0 elements
-Containing 'Minggu': 0 elements
+Containing 'Sabtu': 15 elements
+  - Tag: #root, Class: , Text: Jadwal Rilis – Samehadaku <a href="/" target="_blank"><img src="//sstatic1.histats.com/0.gif?4389157
+  - Tag: html, Class: , Text: Jadwal Rilis – Samehadaku <a href="/" target="_blank"><img src="//sstatic1.histats.com/0.gif?4389157
+  - Tag: body, Class: wp-singular page-template page-template-pages page-template-page-schedule-old page-template-pagespage-schedule-old-php page page-id-80 wp-theme-eastplaydipake1aaa bodyclass, Text: Samehadaku - Nonton Streaming Anime Sub Indo / Samehadaku - Nonton Streaming Anime Sub Indo / Anime 
+Containing 'Minggu': 15 elements
+  - Tag: #root, Class: , Text: Jadwal Rilis – Samehadaku <a href="/" target="_blank"><img src="//sstatic1.histats.com/0.gif?4389157
+  - Tag: html, Class: , Text: Jadwal Rilis – Samehadaku <a href="/" target="_blank"><img src="//sstatic1.histats.com/0.gif?4389157
+  - Tag: body, Class: wp-singular page-template page-template-pages page-template-page-schedule-old page-template-pagespage-schedule-old-php page page-id-80 wp-theme-eastplaydipake1aaa bodyclass, Text: Samehadaku - Nonton Streaming Anime Sub Indo / Samehadaku - Nonton Streaming Anime Sub Indo / Anime 
 
 
 --- BODY SNAPSHOT ---
-Samehadaku - Streaming Anime Sub Indo HD Terbaru & Download Lengkap Switch Mode Home Surprise Me! Latest Release View All ONA Ep 1 Bai Ri Cheng Wang Bai Ri Cheng Wang Episode 1 Subtitle Indonesia TV Ep 1 World Is Dancing World Is Dancing Episode 1 Subtitle Indonesia TV Ep 13 Liar Game Liar Game Episode 13 Subtitle Indonesia TV Ep 1168 One Piece One Piece Episode 1168 Subtitle Indonesia TV Ep 12 Kuroneko to Majo no Kyoushitsu Kuroneko to Majo no Kyoushitsu Episode 12 Subtitle Indonesia TV Ep 13 Diamond no Ace: Act II Second Season Diamond no Ace: Act II Second Season Episode 13 Subtitle Indonesia TV Ep 12 Tsue to Tsurugi no Wistoria Season 2 Tsue to Tsurugi no Wistoria Season 2 Episode 12 Subtitle Indonesia TV Ep 12 Yozakura-san Chi no Daisakusen 2nd Season Yozakura-san Chi no Daisakusen Season 2 Episode 12 Subtitle Indonesia ONA Ep 3 Lord of Mysteries Lord of Mysteries Episode 3 Subtitle Indonesia TV Ep 37 Digimon Beatbreak Digimon Beatbreak Episode 37 Subtitle Indonesia Movie Movie Tensei shitara Slime Datta Ken Movie 2: Soukai no Namida-hen Tensei shitara Slime Datta Ken Movie 2: Soukai no Namida-hen Subtitle Indonesia TV Ep 24 Yuusha no Kuzu Yuusha no Kuzu Episode 24 Subtitle Indonesia TV Ep 13 Needy Girl Overdose Needy Girl Overdose Episode 13 Subtitle Indonesia TV Ep 14 Shunkashuutou Daikousha: Haru no Mai Shunkashuutou Daikousha: Haru no Mai Episode 14 Subtitle Indonesia TV Ep 2 Neko to Ryuu Neko to Ryuu Episode 2 Subtitle Indonesia TV Ep 13 Mao Mao Episode 13 Subtitle 
+Samehadaku - Nonton Streaming Anime Sub Indo / Samehadaku - Nonton Streaming Anime Sub Indo / Anime Terbaru Daftar Anime Batch Jadwal Rilis List Anime Jadwal Rilis Film Terbaru Share × Facebook Twitter Whatsapp Telegram Copy Link Jadwal Rilis Senin Selasa Rabu Kamis Jumaat Sabtu Minggu TV 8.73 One Piece Action, Adventure 00:00 TV 6.8 Kuroneko to Majo no Kyoushitsu Comedy, Fantasy 01:00 TV 8.19 Futsutsuka na Akujo dewa Gozaimasu Fantasy, Romance 01:45 TV 7.32 Toumei na Yoru ni Kakeru Drama, Romance 22:00 TV 6.56 Degarashi Ouji Action, Adventure 23:30 TV 6.50 Gaikotsu Kishi-sama, Tadaima Isekai e Odekakechuu Season 2 Action, Adventure 23:30 Copyright © 2011-2023 - Samehadaku

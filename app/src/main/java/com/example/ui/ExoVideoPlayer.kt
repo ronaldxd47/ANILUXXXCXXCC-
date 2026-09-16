@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
+import android.os.BatteryManager
 import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.util.Log
@@ -27,6 +28,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -53,6 +55,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.data.StreamEmbed
 import com.example.data.stream.ResolvedStream
 import com.example.data.stream.StreamMediaType
@@ -60,6 +63,8 @@ import com.example.data.stream.StreamResolver
 import com.example.utils.FormatUtils
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Formatter
 import java.util.Locale
 
@@ -76,6 +81,7 @@ fun ExoVideoPlayer(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     
     // Playback Engine Mode: True = Native ExoPlayer (HLS/MP4), False = Embedded Web Player Sandbox
@@ -93,14 +99,30 @@ fun ExoVideoPlayer(
     }
     var activeStreamUrl by remember(streamUrl) { mutableStateOf(streamUrl) }
     
-    // Anti-infinite loop flag: ensures auto-fallback triggers only ONCE per stream URL session
-    var hasAttemptedAutoFallback by remember(activeStreamUrl, currentServerName) { mutableStateOf(false) }
+    // Stateful playback session to coordinate retries, re-resolutions, and fallbacks cleanly
+    var playbackSession by remember(activeStreamUrl, currentServerName) {
+        mutableStateOf(
+            PlaybackSession(
+                streamUrl = activeStreamUrl,
+                serverName = currentServerName,
+                activeEngine = PlaybackEngine.EXO
+            )
+        )
+    }
 
     // Player Lifecycle Manager (Singleton)
     val playerManager = remember(context) { PlayerManager.getInstance(context) }
     var exoPlayer by remember { mutableStateOf<ExoPlayer?>(null) }
 
-    // Resolve direct streaming URL with full header preservation and MIME classification
+    // Bind lifecycle so playback pauses on background and cleans up on screen destroy
+    DisposableEffect(lifecycleOwner, playerManager) {
+        playerManager.attachLifecycle(lifecycleOwner)
+        onDispose {
+            playerManager.detachLifecycle()
+        }
+    }
+
+    // Resolve direct streaming URL with full header preservation, validation, and MIME classification
     LaunchedEffect(activeStreamUrl, currentServerName) {
         isResolving = true
         resolveErrorMessage = null
@@ -111,14 +133,18 @@ fun ExoVideoPlayer(
         try {
             val resolved = StreamResolver.resolve(context, activeStreamUrl, currentServerName)
             resolvedStreamState = resolved
+            playbackSession = playbackSession.copy(resolvedStream = resolved)
             if (resolved.isDirect) {
                 useNativeExo = true
             } else {
                 // If stream cannot be resolved to direct media, fallback to Web Player sandbox
+                playbackSession = playbackSession.switchToWeb()
                 useNativeExo = false
             }
         } catch (e: Exception) {
             Log.e("ExoVideoPlayer", "Stream resolution failed", e)
+            resolveErrorMessage = e.message
+            playbackSession = playbackSession.switchToWeb()
             useNativeExo = false
         } finally {
             isResolving = false
@@ -151,6 +177,32 @@ fun ExoVideoPlayer(
     var gestureSeekPreview by remember { mutableStateOf(-1L) }
     var bandwidthSpeedText by remember { mutableStateOf("HD Auto") }
 
+    // Double-Tap Seek Feedback Animation
+    var doubleTapSeekSide by remember { mutableStateOf<String?>(null) }
+    var doubleTapSeekAmount by remember { mutableIntStateOf(0) }
+    var doubleTapAnimTrigger by remember { mutableLongStateOf(0L) }
+
+    LaunchedEffect(doubleTapAnimTrigger) {
+        if (doubleTapAnimTrigger > 0L) {
+            delay(750)
+            doubleTapSeekSide = null
+            doubleTapSeekAmount = 0
+        }
+    }
+
+    // Fullscreen Battery & Clock Status
+    var currentTimeString by remember { mutableStateOf("") }
+    var batteryLevel by remember { mutableIntStateOf(-1) }
+
+    LaunchedEffect(isFullscreen, showControls) {
+        if (isFullscreen && showControls) {
+            val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+            batteryLevel = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+            val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
+            currentTimeString = sdf.format(Date())
+        }
+    }
+
     // Initialize ExoPlayer strictly when direct native playback is active
     DisposableEffect(activeStreamUrl, resolvedStreamState, useNativeExo, playerManager) {
         val stream = resolvedStreamState
@@ -177,35 +229,54 @@ fun ExoVideoPlayer(
                 }
                 override fun onPlayerError(error: PlaybackException) {
                     Log.w("ExoVideoPlayer", "Player error: [${error.errorCodeName}] ${error.message}")
-                    
-                    val causeMsg = error.cause?.message ?: ""
-                    val isFallbackCandidate = error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED ||
-                            error.errorCode == PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED ||
-                            error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
-                            error.errorCode == PlaybackException.ERROR_CODE_IO_UNSPECIFIED ||
-                            causeMsg.contains("Cannot find sync byte", ignoreCase = true)
-
-                    // Smart Fallback: trigger ONLY ONCE per stream URL session to avoid infinite loops
-                    if (isFallbackCandidate && !hasAttemptedAutoFallback) {
-                        Log.i("ExoVideoPlayer", "Smart Auto-Fallback triggered: ExoPlayer encountered protected/malformed stream [${error.errorCodeName}]. Switching to Web Engine...")
-                        hasAttemptedAutoFallback = true
-                        hasPlaybackError = false
-                        playbackErrorMessage = ""
-                        useNativeExo = false
-                        return
-                    }
-
-                    // If fallback was already attempted OR error is unrecoverable, display Error UI clearly
-                    hasPlaybackError = true
-                    playbackErrorMessage = when (error.errorCode) {
-                        PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> "Server video menolak koneksi (HTTP 403/404)"
-                        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
-                        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "Koneksi jaringan internet terputus atau timeout"
-                        PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
-                        PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED -> "Format stream / manifest HLS tidak dapat diputar"
-                        PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
-                        PlaybackException.ERROR_CODE_DECODING_FAILED -> "Codec video perangkat tidak mendukung format ini"
-                        else -> "Gagal memutar video: ${error.errorCodeName}"
+                    val action = PlaybackErrorClassifier.classify(error, playbackSession)
+                    when (action) {
+                        is PlaybackAction.ReResolve -> {
+                            Log.i("ExoVideoPlayer", "Action ReResolve triggered: ${action.reason}")
+                            scope.launch {
+                                isResolving = true
+                                try {
+                                    val fresh = StreamResolver.resolve(context, activeStreamUrl, currentServerName)
+                                    playbackSession = playbackSession.recordReResolve(fresh)
+                                    resolvedStreamState = fresh
+                                    if (fresh.isDirect) {
+                                        useNativeExo = true
+                                        playerManager.prepareStream(fresh, playWhenReady = true)
+                                    } else {
+                                        playbackSession = playbackSession.switchToWeb()
+                                        useNativeExo = false
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e("ExoVideoPlayer", "Re-resolve failed", e)
+                                    playbackSession = playbackSession.switchToWeb()
+                                    useNativeExo = false
+                                } finally {
+                                    isResolving = false
+                                }
+                            }
+                        }
+                        is PlaybackAction.RetryExo -> {
+                            Log.i("ExoVideoPlayer", "Action RetryExo with backoff ${action.delayMs}ms")
+                            playbackSession = playbackSession.recordExoAttempt()
+                            scope.launch {
+                                delay(action.delayMs)
+                                resolvedStreamState?.let { s ->
+                                    playerManager.prepareStream(s, playWhenReady = true)
+                                }
+                            }
+                        }
+                        is PlaybackAction.FallbackToWeb -> {
+                            Log.i("ExoVideoPlayer", "Action FallbackToWeb: ${action.reason}")
+                            playbackSession = playbackSession.switchToWeb()
+                            hasPlaybackError = false
+                            playbackErrorMessage = ""
+                            useNativeExo = false
+                        }
+                        is PlaybackAction.FatalError -> {
+                            Log.e("ExoVideoPlayer", "Action FatalError: ${action.userFriendlyMessage}")
+                            hasPlaybackError = true
+                            playbackErrorMessage = action.userFriendlyMessage
+                        }
                     }
                 }
             }
@@ -329,6 +400,14 @@ fun ExoVideoPlayer(
                                     val width = size.width
                                     val isRight = offset.x > width / 2
                                     exoPlayer?.let { p ->
+                                        val side = if (isRight) "right" else "left"
+                                        if (doubleTapSeekSide == side) {
+                                            doubleTapSeekAmount += 10
+                                        } else {
+                                            doubleTapSeekSide = side
+                                            doubleTapSeekAmount = 10
+                                        }
+                                        doubleTapAnimTrigger = System.currentTimeMillis()
                                         val delta = if (isRight) 10000L else -10000L
                                         val newPos = (p.currentPosition + delta).coerceIn(0L, duration)
                                         p.seekTo(newPos)
@@ -408,7 +487,34 @@ fun ExoVideoPlayer(
                                 Button(
                                     onClick = {
                                         hasPlaybackError = false
-                                        playerManager.retryPlayback()
+                                        playbackSession = PlaybackSession(
+                                            streamUrl = activeStreamUrl,
+                                            serverName = currentServerName,
+                                            activeEngine = PlaybackEngine.EXO,
+                                            resolvedStream = resolvedStreamState
+                                        )
+                                        playerManager.retryPlayback(onReResolveRequired = {
+                                            scope.launch {
+                                                isResolving = true
+                                                try {
+                                                    val fresh = StreamResolver.resolve(context, activeStreamUrl, currentServerName)
+                                                    playbackSession = playbackSession.recordReResolve(fresh)
+                                                    resolvedStreamState = fresh
+                                                    if (fresh.isDirect) {
+                                                        useNativeExo = true
+                                                        playerManager.prepareStream(fresh, playWhenReady = true)
+                                                    } else {
+                                                        playbackSession = playbackSession.switchToWeb()
+                                                        useNativeExo = false
+                                                    }
+                                                } catch (e: Exception) {
+                                                    hasPlaybackError = true
+                                                    playbackErrorMessage = "Gagal memuat ulang: ${e.message}"
+                                                } finally {
+                                                    isResolving = false
+                                                }
+                                            }
+                                        })
                                     },
                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7000FF)),
                                     shape = RoundedCornerShape(8.dp)
@@ -441,6 +547,61 @@ fun ExoVideoPlayer(
                     }
                 }
                 
+                // Double-Tap Seek Ripple Feedback Overlay (YouTube-style)
+                AnimatedVisibility(
+                    visible = doubleTapSeekSide != null,
+                    enter = fadeIn() + scaleIn(initialScale = 0.85f),
+                    exit = fadeOut() + scaleOut(targetScale = 0.95f),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = if (doubleTapSeekSide == "left") Alignment.CenterStart else Alignment.CenterEnd
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .padding(horizontal = if (fullScreenMode) 44.dp else 20.dp)
+                                .clip(CircleShape)
+                                .background(Color.Black.copy(alpha = 0.65f))
+                                .border(1.dp, Color.White.copy(alpha = 0.25f), CircleShape)
+                                .padding(horizontal = 16.dp, vertical = 10.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                if (doubleTapSeekSide == "left") {
+                                    Icon(
+                                        imageVector = Icons.Filled.FastRewind,
+                                        contentDescription = "Rewind",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = "-${doubleTapSeekAmount}s",
+                                        color = Color.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                } else {
+                                    Text(
+                                        text = "+${doubleTapSeekAmount}s",
+                                        color = Color.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Icon(
+                                        imageVector = Icons.Filled.FastForward,
+                                        contentDescription = "Forward",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Controls Overlay
                 AnimatedVisibility(
                     visible = showControls,
@@ -508,7 +669,7 @@ fun ExoVideoPlayer(
                                                 .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
                                                 .size(28.dp)
                                         ) {
-                                            Icon(imageVector = Icons.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(15.dp))
+                                            Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(15.dp))
                                         }
                                         Spacer(modifier = Modifier.width(8.dp))
                                     }
@@ -525,6 +686,43 @@ fun ExoVideoPlayer(
                                     )
                                     
                                     if (fullScreenMode) {
+                                        // Battery & Clock Display
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(Color.White.copy(alpha = 0.12f))
+                                                .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
+                                                .padding(horizontal = 6.dp, vertical = 2.5.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = if (batteryLevel in 0..20) Icons.Filled.BatteryAlert else Icons.Filled.BatteryFull,
+                                                contentDescription = "Battery",
+                                                tint = if (batteryLevel in 0..20) Color(0xFFFF5252) else Color.White.copy(alpha = 0.85f),
+                                                modifier = Modifier.size(12.dp)
+                                            )
+                                            if (batteryLevel >= 0) {
+                                                Spacer(modifier = Modifier.width(3.dp))
+                                                Text(
+                                                    text = "$batteryLevel%",
+                                                    color = Color.White.copy(alpha = 0.85f),
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Medium
+                                                )
+                                            }
+                                            if (currentTimeString.isNotEmpty()) {
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = currentTimeString,
+                                                    color = Color.White.copy(alpha = 0.85f),
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Medium
+                                                )
+                                            }
+                                        }
+
+                                        Spacer(modifier = Modifier.width(6.dp))
+
                                         // Quality / Speed Badge
                                         Box(
                                             modifier = Modifier
@@ -1015,21 +1213,17 @@ fun WebPlayerView(
         onDispose {
             try {
                 webViewInstance?.let { wv ->
-                    wv.evaluateJavascript(
-                        """
-                        (function() {
-                            try {
-                                if (window.hls) { window.hls.destroy(); window.hls = null; }
-                                var v = document.querySelector('video');
-                                if (v) { v.pause(); v.removeAttribute('src'); v.load(); }
-                            } catch(e){}
-                        })();
-                        """.trimIndent(), null
-                    )
+                    webViewInstance = null
                     wv.stopLoading()
+                    wv.webChromeClient = null
+                    wv.webViewClient = object : WebViewClient() {}
                     (wv.parent as? ViewGroup)?.removeView(wv)
                     wv.onPause()
-                    wv.destroy()
+                    wv.postDelayed({
+                        try {
+                            wv.destroy()
+                        } catch (e: Exception) {}
+                    }, 200)
                 }
             } catch (e: Exception) {
                 Log.w("WebPlayerView", "Error disposing WebView: ${e.message}")
@@ -1054,14 +1248,13 @@ fun WebPlayerView(
                     settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
-                        databaseEnabled = false
                         mediaPlaybackRequiresUserGesture = false
-                        allowFileAccess = false
-                        allowContentAccess = false
+                        allowFileAccess = true
+                        allowContentAccess = true
                         loadWithOverviewMode = true
                         useWideViewPort = true
                         setSupportZoom(false)
-                        mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                         userAgentString = headers["User-Agent"]
                             ?: "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
                     }
@@ -1090,12 +1283,6 @@ fun WebPlayerView(
 
                         override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
                             Log.w("WebVideoPlayer", "Render process gone in WebVideoPlayer (didCrash=${detail?.didCrash()})")
-                            try {
-                                view?.let { wv ->
-                                    (wv.parent as? ViewGroup)?.removeView(wv)
-                                    wv.destroy()
-                                }
-                            } catch (e: Exception) {}
                             isLoading = false
                             webViewInstance = null
                             return true
@@ -1129,7 +1316,7 @@ fun WebPlayerView(
                     var cleanUrl = url.trim()
                     if (cleanUrl.startsWith("//")) cleanUrl = "https:$cleanUrl"
                     
-                    // If the URL is a raw direct stream, generate a proper HTML5 player with pinned HLS.js and headers
+                    // If the URL is a raw direct stream, generate a proper HTML5 player with local/cdn HLS.js and headers
                     if (cleanUrl.contains(".m3u8", ignoreCase = true)) {
                         val headersJson = org.json.JSONObject(headers as Map<*, *>).toString()
                         val hlsHtml = """
@@ -1141,38 +1328,52 @@ fun WebPlayerView(
                                     html, body { margin:0; padding:0; width:100%; height:100%; background:#000; overflow:hidden; display:flex; justify-content:center; align-items:center; }
                                     video { width:100%; height:100%; object-fit:contain; }
                                 </style>
-                                <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+                                <script src="file:///android_asset/hls.min.js"></script>
+                                <script>
+                                    if (typeof Hls === 'undefined') {
+                                        var cdnScript = document.createElement('script');
+                                        cdnScript.src = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js';
+                                        document.head.appendChild(cdnScript);
+                                    }
+                                </script>
                             </head>
                             <body>
                                 <video id="video" controls autoplay playsinline></video>
                                 <script>
-                                    var video = document.getElementById('video');
-                                    var videoSrc = '$cleanUrl';
-                                    var customHeaders = $headersJson;
-                                    if (Hls.isSupported()) {
-                                        var hls = new Hls({
-                                            xhrSetup: function(xhr, url) {
-                                                xhr.withCredentials = false;
-                                                for (var k in customHeaders) {
-                                                    if (customHeaders.hasOwnProperty(k)) {
-                                                        var lk = k.toLowerCase();
-                                                        if (lk !== 'referer' && lk !== 'user-agent' && lk !== 'origin' && lk !== 'host') {
-                                                            try { xhr.setRequestHeader(k, customHeaders[k]); } catch(e){}
+                                    function initHls() {
+                                        var video = document.getElementById('video');
+                                        var videoSrc = '$cleanUrl';
+                                        var customHeaders = $headersJson;
+                                        if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+                                            var hls = new Hls({
+                                                xhrSetup: function(xhr, url) {
+                                                    xhr.withCredentials = false;
+                                                    for (var k in customHeaders) {
+                                                        if (customHeaders.hasOwnProperty(k)) {
+                                                            var lk = k.toLowerCase();
+                                                            if (lk !== 'referer' && lk !== 'user-agent' && lk !== 'origin' && lk !== 'host') {
+                                                                try { xhr.setRequestHeader(k, customHeaders[k]); } catch(e){}
+                                                            }
                                                         }
                                                     }
                                                 }
-                                            }
-                                        });
-                                        hls.loadSource(videoSrc);
-                                        hls.attachMedia(video);
-                                        hls.on(Hls.Events.MANIFEST_PARSED, function() {
-                                            video.play().catch(function(){});
-                                        });
-                                    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                                        video.src = videoSrc;
-                                        video.addEventListener('loadedmetadata', function() {
-                                            video.play().catch(function(){});
-                                        });
+                                            });
+                                            hls.loadSource(videoSrc);
+                                            hls.attachMedia(video);
+                                            hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                                                video.play().catch(function(){});
+                                            });
+                                        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                                            video.src = videoSrc;
+                                            video.addEventListener('loadedmetadata', function() {
+                                                video.play().catch(function(){});
+                                            });
+                                        }
+                                    }
+                                    if (typeof Hls !== 'undefined') {
+                                        initHls();
+                                    } else {
+                                        window.addEventListener('load', function() { setTimeout(initHls, 300); });
                                     }
                                 </script>
                             </body>
@@ -1241,7 +1442,7 @@ fun WebPlayerView(
                                 .background(Color.Black.copy(alpha = 0.5f), CircleShape)
                                 .size(28.dp)
                         ) {
-                            Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(15.dp))
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(15.dp))
                         }
                         Spacer(modifier = Modifier.width(6.dp))
                     }

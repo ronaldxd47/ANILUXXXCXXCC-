@@ -111,19 +111,26 @@ class PlayerManager private constructor(context: Context) {
     }
 
     /**
-     * Initializes or re-initializes the ExoPlayer with custom request headers and bandwidth meter.
+     * Initializes or gets the existing ExoPlayer instance. Reuses player instance when possible
+     * to avoid heavy codec/audio hardware teardown across episode transitions.
      */
     @Synchronized
     fun initializePlayer(
         customHeaders: Map<String, String> = emptyMap(),
         externalListener: Player.Listener? = null
     ): ExoPlayer {
-        // Step 1: Release previous instance cleanly
-        releasePlayer()
+        // Reuse healthy player if already instantiated
+        exoPlayer?.let { existing ->
+            Log.d(TAG, "Reusing existing healthy ExoPlayer instance")
+            currentListener?.let { existing.removeListener(it) }
+            externalListener?.let { existing.addListener(it) }
+            currentListener = externalListener
+            return existing
+        }
 
-        Log.d(TAG, "Initializing new ExoPlayer with custom headers: ${customHeaders.keys}")
+        Log.d(TAG, "Initializing fresh ExoPlayer instance...")
 
-        // Step 2: Build HTTP DataSource with sanitized stream headers
+        // Build Default HTTP DataSource with sanitized stream headers
         val safeHeaders = mutableMapOf<String, String>()
         safeHeaders["Accept"] = "*/*"
         customHeaders.forEach { (key, value) ->
@@ -149,7 +156,8 @@ class PlayerManager private constructor(context: Context) {
             .setTransferListener(bandwidthMeter)
             .setDefaultRequestProperties(safeHeaders)
 
-        val mediaSourceFactory = DefaultMediaSourceFactory(httpDataSourceFactory)
+        val mediaSourceFactory = DefaultMediaSourceFactory(appContext)
+            .setDataSourceFactory(httpDataSourceFactory)
 
         // Custom load control for fast buffering
         val loadControl = DefaultLoadControl.Builder()
@@ -223,7 +231,9 @@ class PlayerManager private constructor(context: Context) {
     }
 
     /**
-     * Prepares and starts playback of a [ResolvedStream] with full header context and HLS awareness.
+     * Prepares and starts playback of a [ResolvedStream] with dedicated stream-specific request headers
+     * applied directly to the MediaSource. This guarantees that master playlist, variant playlists,
+     * encryption keys, and video segments all receive the stream's custom Referer, Origin, Cookie, and User-Agent.
      */
     @Synchronized
     fun prepareStream(stream: ResolvedStream, playWhenReady: Boolean = true) {
@@ -231,37 +241,70 @@ class PlayerManager private constructor(context: Context) {
         activeStream = stream
 
         try {
-            Log.d(TAG, "Preparing ResolvedStream: ${stream.url} (type=${stream.mediaType})")
+            Log.d(TAG, "Preparing ResolvedStream with stream-specific headers: ${stream.url} (type=${stream.mediaType}, headers=${stream.headers.keys})")
             p.stop()
             p.clearMediaItems()
 
             val uri = Uri.parse(stream.url)
             val mediaItemBuilder = MediaItem.Builder().setUri(uri)
 
-            when (stream.mediaType) {
+            val lower = stream.url.lowercase()
+            val mimeType: String? = when (stream.mediaType) {
                 StreamMediaType.HLS -> {
-                    mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
+                    if (lower.contains(".m3u8") || stream.contentType.contains("mpegurl", ignoreCase = true)) {
+                        MimeTypes.APPLICATION_M3U8
+                    } else {
+                        null // Allow DefaultMediaSourceFactory container sniffing (MP4, MKV, WebM, HLS)
+                    }
                 }
-                StreamMediaType.DASH -> {
-                    mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_MPD)
-                }
-                StreamMediaType.MP4 -> {
-                    mediaItemBuilder.setMimeType(MimeTypes.VIDEO_MP4)
-                }
+                StreamMediaType.DASH -> MimeTypes.APPLICATION_MPD
+                StreamMediaType.MP4 -> MimeTypes.VIDEO_MP4
                 else -> {
-                    // Fallback detection from URL
-                    val lower = stream.url.lowercase()
-                    if (lower.contains(".m3u8")) {
-                        mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
-                    } else if (lower.contains(".mpd")) {
-                        mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_MPD)
-                    } else if (lower.endsWith(".mp4") || lower.contains(".mp4?")) {
-                        mediaItemBuilder.setMimeType(MimeTypes.VIDEO_MP4)
+                    when {
+                        lower.contains(".m3u8") -> MimeTypes.APPLICATION_M3U8
+                        lower.contains(".mpd") -> MimeTypes.APPLICATION_MPD
+                        lower.endsWith(".mp4") || lower.contains(".mp4?") || lower.contains("videoplayback") -> MimeTypes.VIDEO_MP4
+                        else -> null // Container auto-detection
                     }
                 }
             }
+            if (mimeType != null) {
+                mediaItemBuilder.setMimeType(mimeType)
+            }
+            val mediaItem = mediaItemBuilder.build()
 
-            p.setMediaItem(mediaItemBuilder.build())
+            // Build stream-specific HTTP DataSource Factory with headers
+            val safeHeaders = mutableMapOf<String, String>()
+            safeHeaders["Accept"] = "*/*"
+            stream.headers.forEach { (key, value) ->
+                val k = key.trim()
+                val v = value.trim()
+                if (k.isNotEmpty() && v.isNotEmpty() &&
+                    !k.startsWith("Sec-Fetch-", ignoreCase = true) &&
+                    !k.equals("Host", ignoreCase = true) &&
+                    !k.equals("Content-Length", ignoreCase = true) &&
+                    !k.equals("User-Agent", ignoreCase = true)
+                ) {
+                    safeHeaders[k] = v
+                }
+            }
+
+            val userAgent = stream.headers["User-Agent"]?.takeIf { it.isNotBlank() } ?: DEFAULT_USER_AGENT
+
+            val streamHttpDataSourceFactory = DefaultHttpDataSource.Factory()
+                .setUserAgent(userAgent)
+                .setAllowCrossProtocolRedirects(true)
+                .setConnectTimeoutMs(25000)
+                .setReadTimeoutMs(25000)
+                .setTransferListener(bandwidthMeter)
+                .setDefaultRequestProperties(safeHeaders)
+
+            val mediaSourceFactory = DefaultMediaSourceFactory(appContext)
+                .setDataSourceFactory(streamHttpDataSourceFactory)
+
+            val mediaSource = mediaSourceFactory.createMediaSource(mediaItem)
+
+            p.setMediaSource(mediaSource)
             p.prepare()
             p.playWhenReady = playWhenReady
             if (playWhenReady) {
@@ -286,6 +329,7 @@ class PlayerManager private constructor(context: Context) {
 
     /**
      * Changes video quality using real Media3 TrackSelectionParameters.
+     * Sets ceiling constraints without rigid min-size boundaries that could cause 0 track matches.
      * Supports: "Auto", "1080p", "720p", "480p", "360p".
      */
     fun setVideoQuality(quality: String) {
@@ -293,27 +337,23 @@ class PlayerManager private constructor(context: Context) {
         _currentQuality.value = quality
 
         val builder = p.trackSelectionParameters.buildUpon()
+        builder.clearVideoSizeConstraints()
 
         when (quality.lowercase()) {
             "1080p" -> {
                 builder.setMaxVideoSize(1920, 1080)
-                    .setMinVideoSize(1280, 720)
             }
             "720p" -> {
                 builder.setMaxVideoSize(1280, 720)
-                    .setMinVideoSize(854, 480)
             }
             "480p" -> {
                 builder.setMaxVideoSize(854, 480)
-                    .setMinVideoSize(640, 360)
             }
             "360p" -> {
                 builder.setMaxVideoSize(640, 360)
-                    .setMinVideoSize(0, 0)
             }
             else -> {
-                // Auto: Clear constraints
-                builder.clearVideoSizeConstraints()
+                // Auto: Unconstrained adaptive bitrate
             }
         }
 
@@ -342,9 +382,15 @@ class PlayerManager private constructor(context: Context) {
         }
     }
 
-    fun retryPlayback() {
+    fun retryPlayback(onReResolveRequired: (() -> Unit)? = null) {
         val current = activeStream
-        if (current != null) {
+        val lastErr = _lastError.value
+        val isAuthError = lastErr?.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS
+        
+        if (isAuthError && onReResolveRequired != null) {
+            Log.i(TAG, "Auth error detected on retry: triggering fresh re-resolve...")
+            onReResolveRequired()
+        } else if (current != null) {
             prepareStream(current, playWhenReady = true)
         } else {
             exoPlayer?.prepare()
@@ -413,15 +459,13 @@ class PlayerManager private constructor(context: Context) {
         currentLifecycleOwner = lifecycleOwner
 
         val observer = object : DefaultLifecycleObserver {
-            override fun onPause(owner: LifecycleOwner) {
-                pausePlayer()
-            }
-
             override fun onStop(owner: LifecycleOwner) {
+                // Pause playback when app or screen moves to background
                 pausePlayer()
             }
 
             override fun onDestroy(owner: LifecycleOwner) {
+                // Release player resources when screen lifecycle is completely destroyed
                 releasePlayer()
                 detachLifecycle()
             }
