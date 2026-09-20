@@ -45,6 +45,19 @@ object PlaybackErrorClassifier {
             }
         }
 
+        if (httpCode == 404 || httpCode == 410) {
+            val nextCand = session.nextCandidate
+            return if (nextCand != null) {
+                Log.i(TAG, "HTTP $httpCode on active stream, trying next candidate: ${nextCand.url}")
+                PlaybackAction.NextCandidate(nextCand, "Sumber video tidak ditemukan ($httpCode). Mencoba sumber alternatif...")
+            } else if (session.canFallbackToWeb) {
+                Log.i(TAG, "HTTP $httpCode detected, falling back to Web Sandbox embed")
+                PlaybackAction.FallbackToWeb("Video direct stream tidak ditemukan (HTTP $httpCode). Mengalihkan ke pemutar web...")
+            } else {
+                PlaybackAction.FatalError("Video tidak ditemukan di server ini (HTTP $httpCode). Silakan ganti server.")
+            }
+        }
+
         if (httpCode == 401 || httpCode == 403 || error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS) {
             // Token expired atau CDN security block
             val nextCand = session.nextCandidate

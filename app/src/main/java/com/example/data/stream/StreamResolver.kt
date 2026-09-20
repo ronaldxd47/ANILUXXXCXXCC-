@@ -114,9 +114,9 @@ object StreamResolver {
                 val validated = StreamValidator.validateCandidate(candidate)
                 if (validated.isValidated) {
                     candidates.add(validated)
-                } else if (candidate.url.contains(".m3u8")) {
-                    // Berikan toleransi jika CDN menolak probe tapi format m3u8
-                    candidates.add(candidate.copy(protocol = StreamProtocol.HLS))
+                } else if (candidate.url.contains(".m3u8") && !validated.isDeadLink) {
+                    // Berikan toleransi hanya jika CDN menolak probe (misal token) tapi BUKAN 404 dead link!
+                    candidates.add(candidate.copy(protocol = StreamProtocol.HLS, lastStatusCode = validated.lastStatusCode))
                 }
             }
         } catch (e: Exception) {
@@ -133,8 +133,8 @@ object StreamResolver {
                     val validated = StreamValidator.validateCandidate(candidateWithProvider)
                     if (validated.isValidated) {
                         candidates.add(validated)
-                    } else if (candidateWithProvider.url.contains(".m3u8")) {
-                        candidates.add(candidateWithProvider.copy(protocol = StreamProtocol.HLS))
+                    } else if (candidateWithProvider.url.contains(".m3u8") && !validated.isDeadLink) {
+                        candidates.add(candidateWithProvider.copy(protocol = StreamProtocol.HLS, lastStatusCode = validated.lastStatusCode))
                     }
                 }
             } catch (e: Exception) {

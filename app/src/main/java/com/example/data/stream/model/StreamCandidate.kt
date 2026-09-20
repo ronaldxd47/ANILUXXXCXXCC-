@@ -48,8 +48,12 @@ data class StreamCandidate(
     val originalPageUrl: String = "",
     val iframeChain: List<String> = emptyList(),
     val isLive: Boolean = false,
-    val isValidated: Boolean = false
+    val isValidated: Boolean = false,
+    val lastStatusCode: Int = 0
 ) {
+    val isDeadLink: Boolean
+        get() = lastStatusCode == 404 || lastStatusCode == 410 || (lastStatusCode in 400..499 && lastStatusCode != 401 && lastStatusCode != 403 && lastStatusCode != 429)
+
     /**
      * Konversi ke model ResolvedStream untuk interoperabilitas dengan UI dan player eksisting.
      */
@@ -57,16 +61,18 @@ data class StreamCandidate(
         val mappedMediaType = when (protocol) {
             StreamProtocol.HLS -> StreamMediaType.HLS
             StreamProtocol.DASH -> StreamMediaType.DASH
-            StreamProtocol.PROGRESSIVE -> StreamMediaType.MP4
+            StreamProtocol.PROGRESSIVE -> StreamMediaType.PROGRESSIVE
             StreamProtocol.WEB_EMBED -> StreamMediaType.IFRAME
             else -> {
-                if (container.isDirectVideo) StreamMediaType.MP4 else StreamMediaType.UNKNOWN
+                if (container.isDirectVideo) StreamMediaType.PROGRESSIVE else StreamMediaType.UNKNOWN
             }
         }
 
         return ResolvedStream(
             url = url,
             mediaType = mappedMediaType,
+            protocol = protocol,
+            container = container,
             headers = requestPolicy.toSafeHeaderMap(),
             isDirectVideo = isDirectVideo || protocol.isAdaptive || container.isDirectVideo,
             serverName = providerName,
@@ -79,36 +85,44 @@ data class StreamCandidate(
 
     companion object {
         fun fromResolvedStream(stream: ResolvedStream): StreamCandidate {
-            val protocol = when (stream.mediaType) {
-                StreamMediaType.HLS -> StreamProtocol.HLS
-                StreamMediaType.DASH -> StreamProtocol.DASH
-                StreamMediaType.MP4 -> StreamProtocol.PROGRESSIVE
-                StreamMediaType.IFRAME -> StreamProtocol.WEB_EMBED
-                StreamMediaType.UNKNOWN -> {
-                    val lower = stream.url.lowercase()
-                    when {
-                        lower.contains(".m3u8") -> StreamProtocol.HLS
-                        lower.contains(".mpd") -> StreamProtocol.DASH
-                        lower.endsWith(".mp4") || lower.contains(".mp4?") -> StreamProtocol.PROGRESSIVE
-                        else -> StreamProtocol.UNKNOWN
+            val protocol = if (stream.protocol != StreamProtocol.UNKNOWN) {
+                stream.protocol
+            } else {
+                when (stream.mediaType) {
+                    StreamMediaType.HLS -> StreamProtocol.HLS
+                    StreamMediaType.DASH -> StreamProtocol.DASH
+                    StreamMediaType.PROGRESSIVE, StreamMediaType.MP4 -> StreamProtocol.PROGRESSIVE
+                    StreamMediaType.IFRAME -> StreamProtocol.WEB_EMBED
+                    StreamMediaType.UNKNOWN -> {
+                        val lower = stream.url.lowercase()
+                        when {
+                            lower.contains(".m3u8") -> StreamProtocol.HLS
+                            lower.contains(".mpd") -> StreamProtocol.DASH
+                            lower.endsWith(".mp4") || lower.contains(".mp4?") -> StreamProtocol.PROGRESSIVE
+                            else -> StreamProtocol.UNKNOWN
+                        }
                     }
                 }
             }
 
-            val container = when (protocol) {
-                StreamProtocol.PROGRESSIVE -> {
-                    val lower = stream.url.lowercase()
-                    when {
-                        lower.contains(".webm") -> ContainerFormat.WEBM
-                        lower.contains(".mkv") -> ContainerFormat.MATROSKA
-                        lower.contains(".ts") -> ContainerFormat.MPEG_TS
-                        lower.contains(".flv") -> ContainerFormat.FLV
-                        else -> ContainerFormat.MP4
+            val container = if (stream.container != ContainerFormat.UNKNOWN) {
+                stream.container
+            } else {
+                when (protocol) {
+                    StreamProtocol.PROGRESSIVE -> {
+                        val lower = stream.url.lowercase()
+                        when {
+                            lower.contains(".webm") -> ContainerFormat.WEBM
+                            lower.contains(".mkv") -> ContainerFormat.MATROSKA
+                            lower.contains(".ts") -> ContainerFormat.MPEG_TS
+                            lower.contains(".flv") -> ContainerFormat.FLV
+                            else -> ContainerFormat.MP4
+                        }
                     }
+                    StreamProtocol.HLS -> ContainerFormat.MPEG_TS
+                    StreamProtocol.DASH -> ContainerFormat.FMP4
+                    else -> ContainerFormat.UNKNOWN
                 }
-                StreamProtocol.HLS -> ContainerFormat.MPEG_TS
-                StreamProtocol.DASH -> ContainerFormat.FMP4
-                else -> ContainerFormat.UNKNOWN
             }
 
             return StreamCandidate(

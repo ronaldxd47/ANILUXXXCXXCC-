@@ -704,21 +704,33 @@ object SamehadakuScraper {
             val doc = getDocWithFallback("/jadwal-rilis/") ?: return@withContext emptyList()
             val list = mutableListOf<ScheduleDay>()
             try {
-                // Try standard schedule containers used in Samehadaku / WordPress themes
-                val boxes = doc.select(".schedulepage .tab-pane, .schedule-box, .listSchh, .bip, .jadwal-box, div.schedule-item")
+                // Modern Samehadaku DOM: .widget.schedule, .content.schedule, #the-days, div[data-day], .east_days_option
+                val modernBoxes = doc.select(".widget.schedule .east_days_option, .content.schedule .east_days_option, [data-day], .schedule.pagess .tab-pane, .schedulepage .tab-pane, .schedule-box, .listSchh, .bip, .jadwal-box, div.schedule-item")
+                val boxes = if (modernBoxes.isNotEmpty()) modernBoxes else doc.select(".schedulepage .tab-pane, .schedule-box, .listSchh, .bip, .jadwal-box, div.schedule-item")
+                
                 if (boxes.isNotEmpty()) {
                     for (box in boxes) {
-                        val dayName = box.select("h2, h3, .day-title, .schedule-day, .tab-title").text().trim()
-                            .ifEmpty { box.attr("id").replace("tab-", "").replace("day-", "").replaceFirstChar { it.uppercase() } }
+                        val dataDay = box.attr("data-day").trim()
+                        val dayName = when (dataDay.lowercase()) {
+                            "monday", "senin" -> "Senin"
+                            "tuesday", "selasa" -> "Selasa"
+                            "wednesday", "rabu" -> "Rabu"
+                            "thursday", "kamis" -> "Kamis"
+                            "friday", "jumat" -> "Jumat"
+                            "saturday", "sabtu" -> "Sabtu"
+                            "sunday", "minggu" -> "Minggu"
+                            else -> box.select("h2, h3, .day-title, .schedule-day, .tab-title").text().trim()
+                                .ifEmpty { dataDay.ifEmpty { box.attr("id").replace("tab-", "").replace("day-", "") }.replaceFirstChar { it.uppercase() } }
+                        }
                         if (dayName.isNotEmpty()) {
                             val animeLinks = mutableListOf<ScheduleAnime>()
-                            box.select("article, .subSchh a, .bs, .schedule-item, .animepost").forEach { el ->
+                            box.select("article, .subSchh a, .bs, .schedule-item, .animepost, .post-item, .schedule-card, a[href*='/anime/']").forEach { el ->
                                 val aEl = if (el.tagName() == "a") el else el.select("a").first()
                                 if (aEl != null) {
                                     val rawLink = aEl.attr("href")
                                     val cleanLink = cleanUrl(rawLink)
-                                    val rawTitle = el.select(".title, .tt, h2, h3, .entry-title").text().ifEmpty { aEl.text() }.trim()
-                                    val epText = el.select(".epx, .ep, .eps, span").text().trim()
+                                    val rawTitle = el.select(".title, .tt, h2, h3, .entry-title, .post-title").text().ifEmpty { aEl.text() }.trim()
+                                    val epText = el.select(".epx, .ep, .eps, .post-ep, span").text().trim()
                                     val imgEl = el.select("img").first()
                                     var imgUrl = ""
                                     if (imgEl != null) {

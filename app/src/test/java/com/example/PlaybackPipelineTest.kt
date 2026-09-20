@@ -187,4 +187,80 @@ class PlaybackPipelineTest {
         assertTrue("Expected NextCandidate action", action is PlaybackAction.NextCandidate)
         assertEquals(cand2.url, (action as PlaybackAction.NextCandidate).candidate.url)
     }
+
+    @Test
+    fun `test candidate ranker disqualifies dead links with 404 or 410`() {
+        val deadCandidate = com.example.data.stream.model.StreamCandidate(
+            url = "https://cdn.example.com/dead.m3u8",
+            protocol = com.example.data.stream.model.StreamProtocol.HLS,
+            lastStatusCode = 404
+        )
+        val validCandidate = com.example.data.stream.model.StreamCandidate(
+            url = "https://cdn.example.com/alive.m3u8",
+            protocol = com.example.data.stream.model.StreamProtocol.HLS,
+            isValidated = true,
+            lastStatusCode = 200
+        )
+        val ranked = com.example.data.stream.ranking.CandidateRanker.rankCandidates(listOf(deadCandidate, validCandidate))
+        assertEquals(1, ranked.size)
+        assertEquals("https://cdn.example.com/alive.m3u8", ranked.first().url)
+    }
+
+    @Test
+    fun `test error classifier handles 404 specifically by advancing candidate`() {
+        val cand1 = com.example.data.stream.model.StreamCandidate(
+            url = "https://server1.com/dead.m3u8",
+            protocol = com.example.data.stream.model.StreamProtocol.HLS
+        )
+        val cand2 = com.example.data.stream.model.StreamCandidate(
+            url = "https://server2.com/backup.m3u8",
+            protocol = com.example.data.stream.model.StreamProtocol.HLS
+        )
+        val session = PlaybackSession(
+            streamUrl = cand1.url,
+            serverName = "Server 1",
+            candidates = listOf(cand1, cand2),
+            currentCandidateIndex = 0
+        )
+        val dataSpec = androidx.media3.datasource.DataSpec(android.net.Uri.parse(cand1.url))
+        val http404 = HttpDataSource.InvalidResponseCodeException(
+            404, "Not Found", null, emptyMap(), dataSpec, byteArrayOf()
+        )
+        val error = PlaybackException("HTTP 404", http404, PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS)
+
+        val action = PlaybackErrorClassifier.classify(error, session)
+        assertTrue("Expected NextCandidate action on 404", action is PlaybackAction.NextCandidate)
+        assertEquals(cand2.url, (action as PlaybackAction.NextCandidate).candidate.url)
+    }
+
+    @Test
+    fun `test stream candidate preserves container and protocol across conversions`() {
+        val candidate = com.example.data.stream.model.StreamCandidate(
+            url = "https://cdn.example.com/video.webm",
+            protocol = com.example.data.stream.model.StreamProtocol.PROGRESSIVE,
+            container = com.example.data.stream.model.ContainerFormat.WEBM,
+            mimeType = "video/webm",
+            isDirectVideo = true
+        )
+        val resolved = candidate.toResolvedStream()
+        assertEquals(StreamMediaType.PROGRESSIVE, resolved.mediaType)
+        assertEquals(com.example.data.stream.model.StreamProtocol.PROGRESSIVE, resolved.protocol)
+        assertEquals(com.example.data.stream.model.ContainerFormat.WEBM, resolved.container)
+        assertTrue(resolved.isProgressive)
+        assertTrue(resolved.isDirect)
+
+        val reconstructed = com.example.data.stream.model.StreamCandidate.fromResolvedStream(resolved)
+        assertEquals(com.example.data.stream.model.StreamProtocol.PROGRESSIVE, reconstructed.protocol)
+        assertEquals(com.example.data.stream.model.ContainerFormat.WEBM, reconstructed.container)
+    }
+
+    @Test
+    fun `test url token redaction masks sensitive credentials`() {
+        val rawUrl = "https://cdn.example.com/stream.m3u8?token=SECRET_ABCD1234&expires=1726000000&id=42"
+        val redacted = com.example.ui.PlayerManager.redactUrl(rawUrl)
+        assertTrue("Token should be masked", redacted.contains("token=REDACTED"))
+        assertTrue("Expires should be masked", redacted.contains("expires=REDACTED"))
+        assertTrue("Normal query params should remain", redacted.contains("id=42"))
+    }
 }
+

@@ -212,112 +212,114 @@ fun ExoVideoPlayer(
         }
     }
 
-    // Initialize ExoPlayer strictly when direct native playback is active
-    DisposableEffect(activeStreamUrl, resolvedStreamState, useNativeExo, playerManager) {
-        val stream = resolvedStreamState
-        val isDirectReady = stream != null && stream.isDirect && useNativeExo
-
-        if (isDirectReady) {
-            val listener = object : Player.Listener {
-                override fun onIsPlayingChanged(isPlaying: Boolean) {
-                    isPlayingState = isPlaying
+    // Initialize ExoPlayer strictly bounded to screen/session lifecycle, NOT to transient candidate mutations
+    DisposableEffect(activeStreamUrl, currentServerName, playerManager) {
+        val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                isPlayingState = isPlaying
+            }
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                isPlayingState = playWhenReady && playbackState != Player.STATE_ENDED
+            }
+            override fun onPlaybackStateChanged(state: Int) {
+                playbackState = state
+                isBuffering = state == Player.STATE_BUFFERING
+                if (state == Player.STATE_READY) {
+                    exoPlayer?.let { duration = it.duration }
+                    hasPlaybackError = false
                 }
-                override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-                    isPlayingState = playWhenReady && playbackState != Player.STATE_ENDED
+                if (state == Player.STATE_ENDED) {
+                    isPlayingState = false
                 }
-                override fun onPlaybackStateChanged(state: Int) {
-                    playbackState = state
-                    isBuffering = state == Player.STATE_BUFFERING
-                    if (state == Player.STATE_READY) {
-                        exoPlayer?.let { duration = it.duration }
-                        hasPlaybackError = false
-                    }
-                    if (state == Player.STATE_ENDED) {
-                        isPlayingState = false
-                    }
-                }
-                override fun onPlayerError(error: PlaybackException) {
-                    Log.w("ExoVideoPlayer", "Player error: [${error.errorCodeName}] ${error.message}")
-                    val action = PlaybackErrorClassifier.classify(error, playbackSession)
-                    when (action) {
-                        is PlaybackAction.NextCandidate -> {
-                            Log.i("ExoVideoPlayer", "Action NextCandidate triggered: ${action.reason} -> ${action.candidate.url}")
-                            playbackSession = playbackSession.advanceToNextCandidate()
-                            val nextStream = action.candidate.toResolvedStream()
-                            resolvedStreamState = nextStream
-                            if (nextStream.isDirect) {
-                                useNativeExo = true
-                                playerManager.prepareCandidate(action.candidate, playWhenReady = true)
-                            } else {
-                                playbackSession = playbackSession.switchToWeb()
-                                useNativeExo = false
-                            }
-                        }
-                        is PlaybackAction.ReResolve -> {
-                            Log.i("ExoVideoPlayer", "Action ReResolve triggered: ${action.reason}")
-                            scope.launch {
-                                isResolving = true
-                                try {
-                                    val fresh = StreamResolver.resolve(context, activeStreamUrl, currentServerName)
-                                    playbackSession = playbackSession.recordReResolve(fresh)
-                                    resolvedStreamState = fresh
-                                    if (fresh.isDirect) {
-                                        useNativeExo = true
-                                        playerManager.prepareStream(fresh, playWhenReady = true)
-                                    } else {
-                                        playbackSession = playbackSession.switchToWeb()
-                                        useNativeExo = false
-                                    }
-                                } catch (e: Exception) {
-                                    Log.e("ExoVideoPlayer", "Re-resolve failed", e)
-                                    playbackSession = playbackSession.switchToWeb()
-                                    useNativeExo = false
-                                } finally {
-                                    isResolving = false
-                                }
-                            }
-                        }
-                        is PlaybackAction.RetryExo -> {
-                            Log.i("ExoVideoPlayer", "Action RetryExo with backoff ${action.delayMs}ms")
-                            playbackSession = playbackSession.recordExoAttempt()
-                            scope.launch {
-                                delay(action.delayMs)
-                                resolvedStreamState?.let { s ->
-                                    playerManager.prepareStream(s, playWhenReady = true)
-                                }
-                            }
-                        }
-                        is PlaybackAction.FallbackToWeb -> {
-                            Log.i("ExoVideoPlayer", "Action FallbackToWeb: ${action.reason}")
+            }
+            override fun onPlayerError(error: PlaybackException) {
+                Log.w("ExoVideoPlayer", "Player error: [${error.errorCodeName}] ${error.message}")
+                val action = PlaybackErrorClassifier.classify(error, playbackSession)
+                when (action) {
+                    is PlaybackAction.NextCandidate -> {
+                        val safeCandUrl = PlayerManager.redactUrl(action.candidate.url)
+                        Log.i("ExoVideoPlayer", "Action NextCandidate triggered: ${action.reason} -> $safeCandUrl")
+                        playbackSession = playbackSession.advanceToNextCandidate()
+                        val nextStream = action.candidate.toResolvedStream()
+                        resolvedStreamState = nextStream
+                        if (nextStream.isDirect) {
+                            useNativeExo = true
+                            playerManager.prepareCandidate(action.candidate, playWhenReady = true)
+                        } else {
                             playbackSession = playbackSession.switchToWeb()
-                            hasPlaybackError = false
-                            playbackErrorMessage = ""
                             useNativeExo = false
                         }
-                        is PlaybackAction.FatalError -> {
-                            Log.e("ExoVideoPlayer", "Action FatalError: ${action.userFriendlyMessage}")
-                            hasPlaybackError = true
-                            playbackErrorMessage = action.userFriendlyMessage
+                    }
+                    is PlaybackAction.ReResolve -> {
+                        Log.i("ExoVideoPlayer", "Action ReResolve triggered: ${action.reason}")
+                        scope.launch {
+                            isResolving = true
+                            try {
+                                val fresh = StreamResolver.resolve(context, activeStreamUrl, currentServerName)
+                                playbackSession = playbackSession.recordReResolve(fresh)
+                                resolvedStreamState = fresh
+                                if (fresh.isDirect) {
+                                    useNativeExo = true
+                                    playerManager.prepareStream(fresh, playWhenReady = true)
+                                } else {
+                                    playbackSession = playbackSession.switchToWeb()
+                                    useNativeExo = false
+                                }
+                            } catch (e: Exception) {
+                                Log.e("ExoVideoPlayer", "Re-resolve failed", e)
+                                playbackSession = playbackSession.switchToWeb()
+                                useNativeExo = false
+                            } finally {
+                                isResolving = false
+                            }
                         }
+                    }
+                    is PlaybackAction.RetryExo -> {
+                        Log.i("ExoVideoPlayer", "Action RetryExo with backoff ${action.delayMs}ms")
+                        playbackSession = playbackSession.recordExoAttempt()
+                        scope.launch {
+                            delay(action.delayMs)
+                            resolvedStreamState?.let { s ->
+                                playerManager.prepareStream(s, playWhenReady = true)
+                            }
+                        }
+                    }
+                    is PlaybackAction.FallbackToWeb -> {
+                        Log.i("ExoVideoPlayer", "Action FallbackToWeb: ${action.reason}")
+                        playbackSession = playbackSession.switchToWeb()
+                        hasPlaybackError = false
+                        playbackErrorMessage = ""
+                        useNativeExo = false
+                        playerManager.pause()
+                    }
+                    is PlaybackAction.FatalError -> {
+                        Log.e("ExoVideoPlayer", "Action FatalError: ${action.userFriendlyMessage}")
+                        hasPlaybackError = true
+                        playbackErrorMessage = action.userFriendlyMessage
                     }
                 }
             }
-
-            val instance = playerManager.initializePlayer(
-                customHeaders = stream.headers,
-                externalListener = listener
-            )
-            exoPlayer = instance
-            playerManager.prepareStream(stream)
-        } else {
-            // Ensure any previous native player instance is released when in Web Player mode
-            playerManager.releasePlayer()
-            exoPlayer = null
         }
+
+        val instance = playerManager.initializePlayer(
+            refererUrl = activeStreamUrl,
+            externalListener = listener
+        )
+        exoPlayer = instance
 
         onDispose {
             playerManager.releasePlayer()
             exoPlayer = null
+        }
+    }
+
+    // Effect to trigger stream playback whenever a valid direct stream is resolved or changed
+    LaunchedEffect(resolvedStreamState, useNativeExo) {
+        val stream = resolvedStreamState
+        if (stream != null && stream.isDirect && useNativeExo) {
+            playerManager.prepareStream(stream)
+        } else if (!useNativeExo) {
+            playerManager.pause()
         }
     }
 
@@ -353,11 +355,8 @@ fun ExoVideoPlayer(
         ) {
             if (!useNativeExo || (resolvedStreamState != null && !resolvedStreamState!!.isDirect)) {
                 // Embedded Sandboxed Web Engine
-                val webUrl = if (resolvedStreamState != null && resolvedStreamState!!.isDirect && resolvedStreamState!!.url.isNotEmpty()) {
-                    resolvedStreamState!!.url
-                } else {
-                    resolvedStreamState?.originalIframeUrl ?: activeStreamUrl
-                }
+                val webUrl = resolvedStreamState?.originalIframeUrl?.takeIf { it.isNotBlank() && !it.contains(".m3u8") } 
+                    ?: activeStreamUrl
                 WebPlayerView(
                     url = webUrl,
                     title = title,

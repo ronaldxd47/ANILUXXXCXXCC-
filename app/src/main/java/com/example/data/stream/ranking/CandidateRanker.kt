@@ -17,7 +17,11 @@ object CandidateRanker {
         var score = 0
         val lowerUrl = candidate.url.lowercase()
 
-        // 1. Hard Penalties: Ads, tracking, and web challenge pages
+        // 1. Hard Penalties: Dead links, Ads, tracking, and web challenge pages
+        if (candidate.isDeadLink) {
+            return -100 // Blacklist Dead Links (HTTP 404 / 410 / Broken)
+        }
+
         if (lowerUrl.contains("googleads") ||
             lowerUrl.contains("doubleclick") ||
             lowerUrl.contains("adservice") ||

@@ -34,6 +34,24 @@ object StreamValidator {
         .readTimeout(7, TimeUnit.SECONDS)
         .build()
 
+    enum class ForbiddenReason {
+        NONE,
+        TOKEN_EXPIRED,
+        REFERER_REQUIRED,
+        ORIGIN_REQUIRED,
+        COOKIE_REQUIRED,
+        WAF_BLOCKED,
+        UNKNOWN_403
+    }
+
+    // In-memory cache untuk mencegah duplicate network probe pada URL yang sama (TTL 60s)
+    private data class CacheEntry(
+        val result: ValidationResult,
+        val timestamp: Long = System.currentTimeMillis()
+    )
+    private val validationCache = java.util.concurrent.ConcurrentHashMap<String, CacheEntry>()
+    private const val CACHE_TTL_MS = 60_000L
+
     sealed class ValidationResult {
         data class Valid(
             val mediaType: StreamMediaType,
@@ -46,7 +64,9 @@ object StreamValidator {
         data class Invalid(
             val statusCode: Int,
             val reason: String,
-            val isTokenExpired: Boolean
+            val isTokenExpired: Boolean,
+            val isDeadLink: Boolean = false,
+            val forbiddenReason: ForbiddenReason = ForbiddenReason.NONE
         ) : ValidationResult()
     }
 
@@ -64,6 +84,12 @@ object StreamValidator {
                 reason = "URL stream tidak valid atau kosong",
                 isTokenExpired = false
             )
+        }
+
+        // Cache Check (Anti-Duplicate Probe)
+        val cached = validationCache[url]
+        if (cached != null && (System.currentTimeMillis() - cached.timestamp) < CACHE_TTL_MS) {
+            return@withContext cached.result
         }
 
         try {
@@ -91,35 +117,84 @@ object StreamValidator {
 
                 // Stage 3 & Status check
                 if (code == 401 || code == 403) {
-                    Log.w(TAG, "Probe HTTP $code on stream: $url (token expired or CDN forbidden)")
-                    return@withContext ValidationResult.Invalid(
+                    val serverHeader = resp.header("Server", "") ?: ""
+                    val cfRay = resp.header("CF-RAY")
+                    val hasReferer = safeHeaders.keys.any { it.equals("Referer", ignoreCase = true) }
+                    val hasOrigin = safeHeaders.keys.any { it.equals("Origin", ignoreCase = true) }
+                    val hasCookie = safeHeaders.keys.any { it.equals("Cookie", ignoreCase = true) }
+
+                    val (forbiddenReason, reasonText) = when {
+                        cfRay != null || serverHeader.contains("cloudflare", ignoreCase = true) ->
+                            ForbiddenReason.WAF_BLOCKED to "Cloudflare WAF / Anti-Bot memblokir akses (HTTP $code)"
+                        !hasReferer ->
+                            ForbiddenReason.REFERER_REQUIRED to "Diperlukan header Referer untuk akses stream (HTTP $code)"
+                        !hasOrigin ->
+                            ForbiddenReason.ORIGIN_REQUIRED to "Diperlukan header Origin untuk akses stream (HTTP $code)"
+                        !hasCookie ->
+                            ForbiddenReason.COOKIE_REQUIRED to "Diperlukan Cookie sesi untuk akses stream (HTTP $code)"
+                        else ->
+                            ForbiddenReason.TOKEN_EXPIRED to "Akses ditolak atau token kedaluwarsa oleh CDN (HTTP $code)"
+                    }
+
+                    Log.w(TAG, "Probe HTTP $code on stream: $url -> $reasonText")
+                    val res = ValidationResult.Invalid(
                         statusCode = code,
-                        reason = "Akses ditolak oleh server CDN (HTTP $code)",
-                        isTokenExpired = true
+                        reason = reasonText,
+                        isTokenExpired = (forbiddenReason == ForbiddenReason.TOKEN_EXPIRED),
+                        forbiddenReason = forbiddenReason
                     )
+                    validationCache[url] = CacheEntry(res)
+                    return@withContext res
+                }
+
+                if (code == 404 || code == 410) {
+                    Log.w(TAG, "Probe HTTP $code on stream: $url (dead stream link)")
+                    val res = ValidationResult.Invalid(
+                        statusCode = code,
+                        reason = "Stream tidak ditemukan di server (HTTP $code)",
+                        isTokenExpired = false,
+                        isDeadLink = true
+                    )
+                    validationCache[url] = CacheEntry(res)
+                    return@withContext res
                 }
 
                 if (code == 429) {
-                    return@withContext ValidationResult.Invalid(
+                    val res = ValidationResult.Invalid(
                         statusCode = 429,
                         reason = "Terlalu banyak permintaan (HTTP 429 Rate Limit)",
                         isTokenExpired = false
                     )
+                    validationCache[url] = CacheEntry(res)
+                    return@withContext res
                 }
 
                 if (code !in 200..299 && code != 206) {
-                    return@withContext ValidationResult.Invalid(
+                    val res = ValidationResult.Invalid(
                         statusCode = code,
                         reason = "Server mengembalikan kode error HTTP $code",
-                        isTokenExpired = false
+                        isTokenExpired = false,
+                        isDeadLink = code in 400..499
                     )
+                    validationCache[url] = CacheEntry(res)
+                    return@withContext res
                 }
 
                 // Stage 4: Content-Type Inspection
                 var protocol = ProtocolDetector.detect(finalUrl, contentType, "")
 
-                // Stage 5: Small body sample (maksimal 4KB)
-                val bodyBytes = resp.body?.bytes() ?: byteArrayOf()
+                // Stage 5: Bounded body sample (maksimal 4096 bytes) - ANTI-OOM Memory Safety
+                val bodyBytes = resp.body?.byteStream()?.use { input ->
+                    val buffer = ByteArray(4096)
+                    var totalRead = 0
+                    while (totalRead < buffer.size) {
+                        val read = input.read(buffer, totalRead, buffer.size - totalRead)
+                        if (read == -1) break
+                        totalRead += read
+                    }
+                    if (totalRead == buffer.size) buffer else buffer.copyOf(totalRead)
+                } ?: byteArrayOf()
+
                 val bodySnippet = if (bodyBytes.isNotEmpty()) {
                     String(bodyBytes, Charsets.UTF_8).take(2048)
                 } else ""
@@ -129,11 +204,13 @@ object StreamValidator {
                     bodySnippet.contains("<html", ignoreCase = true)
                 ) {
                     Log.w(TAG, "Candidate stream returned HTML web page instead of media: $url")
-                    return@withContext ValidationResult.Invalid(
+                    val res = ValidationResult.Invalid(
                         statusCode = code,
                         reason = "Server mengembalikan halaman web HTML, bukan stream media",
                         isTokenExpired = false
                     )
+                    validationCache[url] = CacheEntry(res)
+                    return@withContext res
                 }
 
                 // Stage 6: Protocol detection dari manifest signature
@@ -151,25 +228,27 @@ object StreamValidator {
                 val mappedMediaType = when (protocol) {
                     StreamProtocol.HLS -> StreamMediaType.HLS
                     StreamProtocol.DASH -> StreamMediaType.DASH
-                    StreamProtocol.PROGRESSIVE -> StreamMediaType.MP4
+                    StreamProtocol.PROGRESSIVE -> StreamMediaType.PROGRESSIVE
                     else -> {
-                        if (container.isDirectVideo) StreamMediaType.MP4 else StreamMediaType.UNKNOWN
+                        if (container.isDirectVideo) StreamMediaType.PROGRESSIVE else StreamMediaType.UNKNOWN
                     }
                 }
 
-                return@withContext ValidationResult.Valid(
+                val res = ValidationResult.Valid(
                     mediaType = mappedMediaType,
                     contentType = contentType.ifEmpty { container.defaultMime },
                     protocol = protocol,
                     container = container,
                     confidence = 0.95f
                 )
+                validationCache[url] = CacheEntry(res)
+                return@withContext res
             }
         } catch (e: Exception) {
             Log.w(TAG, "Stream probe error for $url: ${e.message}")
             // Fallback gracefully bila probe jaringan timeout tapi ekstensi URL jelas
             val lower = url.lowercase()
-            return@withContext when {
+            val fallbackRes = when {
                 lower.contains(".m3u8") -> ValidationResult.Valid(
                     mediaType = StreamMediaType.HLS,
                     contentType = "application/vnd.apple.mpegurl",
@@ -184,19 +263,34 @@ object StreamValidator {
                     container = ContainerFormat.FMP4,
                     confidence = 0.6f
                 )
-                lower.contains(".mp4") -> ValidationResult.Valid(
-                    mediaType = StreamMediaType.MP4,
+                lower.endsWith(".mp4") || lower.contains(".mp4?") -> ValidationResult.Valid(
+                    mediaType = StreamMediaType.PROGRESSIVE,
                     contentType = "video/mp4",
                     protocol = StreamProtocol.PROGRESSIVE,
                     container = ContainerFormat.MP4,
                     confidence = 0.6f
                 )
+                lower.endsWith(".webm") || lower.contains(".webm?") -> ValidationResult.Valid(
+                    mediaType = StreamMediaType.PROGRESSIVE,
+                    contentType = "video/webm",
+                    protocol = StreamProtocol.PROGRESSIVE,
+                    container = ContainerFormat.WEBM,
+                    confidence = 0.6f
+                )
+                lower.endsWith(".mkv") || lower.contains(".mkv?") -> ValidationResult.Valid(
+                    mediaType = StreamMediaType.PROGRESSIVE,
+                    contentType = "video/x-matroska",
+                    protocol = StreamProtocol.PROGRESSIVE,
+                    container = ContainerFormat.MATROSKA,
+                    confidence = 0.6f
+                )
                 else -> ValidationResult.Invalid(
                     statusCode = 0,
-                    reason = "Gagal memverifikasi stream: ${e.message}",
+                    reason = "Probe jaringan gagal: ${e.message}",
                     isTokenExpired = false
                 )
             }
+            return@withContext fallbackRes
         }
     }
 
@@ -211,11 +305,13 @@ object StreamValidator {
                 container = if (candidate.container == ContainerFormat.UNKNOWN) result.container else candidate.container,
                 mimeType = result.contentType,
                 isValidated = true,
-                confidence = result.confidence
+                confidence = result.confidence,
+                lastStatusCode = 200
             )
             is ValidationResult.Invalid -> candidate.copy(
                 isValidated = false,
-                confidence = 0.1f
+                confidence = 0.1f,
+                lastStatusCode = result.statusCode
             )
         }
     }

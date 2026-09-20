@@ -92,6 +92,12 @@ class PlayerManager private constructor(context: Context) {
                 INSTANCE ?: PlayerManager(context).also { INSTANCE = it }
             }
         }
+
+        fun redactUrl(url: String): String {
+            return url.replace(Regex("([?&](?:token|sig|signature|expires|auth|key)=)[^&]+", RegexOption.IGNORE_CASE)) {
+                "${it.groupValues[1]}REDACTED"
+            }
+        }
     }
 
     /**
@@ -245,7 +251,8 @@ class PlayerManager private constructor(context: Context) {
         activeStream = stream
 
         try {
-            Log.d(TAG, "Preparing ResolvedStream with stream-specific headers: ${stream.url} (type=${stream.mediaType}, headers=${stream.headers.keys})")
+            val safeLogUrl = redactUrl(stream.url)
+            Log.d(TAG, "Preparing ResolvedStream with stream-specific headers: $safeLogUrl (type=${stream.mediaType}, container=${stream.container}, headers=${stream.headers.keys})")
             p.stop()
             p.clearMediaItems()
 
@@ -253,10 +260,12 @@ class PlayerManager private constructor(context: Context) {
             val mediaItemBuilder = MediaItem.Builder().setUri(uri)
 
             val lower = stream.url.lowercase()
-            val detectedProtocol = when (stream.mediaType) {
+            val detectedProtocol = if (stream.protocol != StreamProtocol.UNKNOWN) {
+                stream.protocol
+            } else when (stream.mediaType) {
                 StreamMediaType.HLS -> StreamProtocol.HLS
                 StreamMediaType.DASH -> StreamProtocol.DASH
-                StreamMediaType.MP4 -> StreamProtocol.PROGRESSIVE
+                StreamMediaType.PROGRESSIVE, StreamMediaType.MP4 -> StreamProtocol.PROGRESSIVE
                 else -> ProtocolDetector.detect(stream.url, stream.contentType, "")
             }
 
@@ -266,12 +275,21 @@ class PlayerManager private constructor(context: Context) {
                 StreamProtocol.SMOOTH_STREAMING -> "application/vnd.ms-sstr+xml"
                 StreamProtocol.RTSP -> "application/x-rtsp"
                 StreamProtocol.PROGRESSIVE -> {
-                    when {
-                        lower.contains(".webm") || stream.contentType.contains("webm", ignoreCase = true) -> MimeTypes.VIDEO_WEBM
-                        lower.contains(".mkv") || stream.contentType.contains("matroska", ignoreCase = true) -> MimeTypes.VIDEO_MATROSKA
-                        lower.contains(".ts") || stream.contentType.contains("mp2t", ignoreCase = true) -> MimeTypes.VIDEO_MP2T
-                        lower.endsWith(".mp4") || lower.contains(".mp4?") || stream.contentType.contains("mp4", ignoreCase = true) -> MimeTypes.VIDEO_MP4
-                        else -> null // Auto-detection by Media3 extractors
+                    when (stream.container) {
+                        ContainerFormat.WEBM -> MimeTypes.VIDEO_WEBM
+                        ContainerFormat.MATROSKA -> MimeTypes.VIDEO_MATROSKA
+                        ContainerFormat.MPEG_TS -> MimeTypes.VIDEO_MP2T
+                        ContainerFormat.MP4, ContainerFormat.FMP4 -> MimeTypes.VIDEO_MP4
+                        ContainerFormat.FLV -> "video/x-flv"
+                        else -> {
+                            when {
+                                lower.contains(".webm") || stream.contentType.contains("webm", ignoreCase = true) -> MimeTypes.VIDEO_WEBM
+                                lower.contains(".mkv") || stream.contentType.contains("matroska", ignoreCase = true) -> MimeTypes.VIDEO_MATROSKA
+                                lower.contains(".ts") || stream.contentType.contains("mp2t", ignoreCase = true) -> MimeTypes.VIDEO_MP2T
+                                lower.endsWith(".mp4") || lower.contains(".mp4?") || stream.contentType.contains("mp4", ignoreCase = true) -> MimeTypes.VIDEO_MP4
+                                else -> null
+                            }
+                        }
                     }
                 }
                 else -> null
@@ -440,6 +458,8 @@ class PlayerManager private constructor(context: Context) {
         }
     }
 
+    fun pause() = pausePlayer()
+
     fun playPlayer() {
         try {
             exoPlayer?.play()
@@ -448,6 +468,8 @@ class PlayerManager private constructor(context: Context) {
             Log.e(TAG, "Error resuming player: ${e.message}", e)
         }
     }
+
+    fun play() = playPlayer()
 
     fun seekTo(positionMs: Long) {
         exoPlayer?.let { p ->
