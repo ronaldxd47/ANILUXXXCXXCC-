@@ -131,9 +131,18 @@ fun ExoVideoPlayer(
         useNativeExo = true
         
         try {
-            val resolved = StreamResolver.resolve(context, activeStreamUrl, currentServerName)
+            val candidates = StreamResolver.resolveCandidates(context, activeStreamUrl, currentServerName)
+            val topCandidate = candidates.firstOrNull()
+            val resolved = topCandidate?.toResolvedStream() ?: StreamResolver.resolve(context, activeStreamUrl, currentServerName)
             resolvedStreamState = resolved
-            playbackSession = playbackSession.copy(resolvedStream = resolved)
+            playbackSession = PlaybackSession(
+                streamUrl = activeStreamUrl,
+                serverName = currentServerName,
+                activeEngine = if (resolved.isDirect) PlaybackEngine.EXO else PlaybackEngine.WEBVIEW,
+                resolvedStream = resolved,
+                candidates = candidates,
+                currentCandidateIndex = 0
+            )
             if (resolved.isDirect) {
                 useNativeExo = true
             } else {
@@ -231,6 +240,19 @@ fun ExoVideoPlayer(
                     Log.w("ExoVideoPlayer", "Player error: [${error.errorCodeName}] ${error.message}")
                     val action = PlaybackErrorClassifier.classify(error, playbackSession)
                     when (action) {
+                        is PlaybackAction.NextCandidate -> {
+                            Log.i("ExoVideoPlayer", "Action NextCandidate triggered: ${action.reason} -> ${action.candidate.url}")
+                            playbackSession = playbackSession.advanceToNextCandidate()
+                            val nextStream = action.candidate.toResolvedStream()
+                            resolvedStreamState = nextStream
+                            if (nextStream.isDirect) {
+                                useNativeExo = true
+                                playerManager.prepareCandidate(action.candidate, playWhenReady = true)
+                            } else {
+                                playbackSession = playbackSession.switchToWeb()
+                                useNativeExo = false
+                            }
+                        }
                         is PlaybackAction.ReResolve -> {
                             Log.i("ExoVideoPlayer", "Action ReResolve triggered: ${action.reason}")
                             scope.launch {
@@ -1240,6 +1262,7 @@ fun WebPlayerView(
         AndroidView(
             factory = { ctx ->
                 WebView(ctx).apply {
+                    setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                     layoutParams = ViewGroup.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT

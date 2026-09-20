@@ -119,4 +119,72 @@ class PlaybackPipelineTest {
         assertEquals(0, updated.exoAttempts)
         assertEquals("https://example.com/fresh.m3u8", updated.resolvedStream?.url)
     }
+
+    @Test
+    fun `test protocol detector identifies HLS manifest signature and URL`() {
+        val sampleHls = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nchunklist.m3u8"
+        val detected = com.example.data.stream.detector.ProtocolDetector.detect(
+            url = "https://cdn.example.com/live/playlist.m3u8",
+            sampleContent = sampleHls
+        )
+        assertEquals(com.example.data.stream.model.StreamProtocol.HLS, detected)
+    }
+
+    @Test
+    fun `test container sniffer recognizes MP4 ftyp box`() {
+        val fakeMp4Header = byteArrayOf(0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6F, 0x6D) // 'ftyp'
+        val format = com.example.data.stream.detector.ContainerSniffer.sniff(fakeMp4Header, "https://cdn.example.com/video")
+        assertEquals(com.example.data.stream.model.ContainerFormat.MP4, format)
+    }
+
+    @Test
+    fun `test container sniffer recognizes Matroska EBML header`() {
+        val ebmlHeader = byteArrayOf(0x1A.toByte(), 0x45.toByte(), 0xDF.toByte(), 0xA3.toByte(), 0x01, 0x00)
+        val format = com.example.data.stream.detector.ContainerSniffer.sniff(ebmlHeader, "https://cdn.example.com/video.mkv")
+        assertEquals(com.example.data.stream.model.ContainerFormat.MATROSKA, format)
+    }
+
+    @Test
+    fun `test candidate ranker penalizes ads and prioritizes direct HLS`() {
+        val adCandidate = com.example.data.stream.model.StreamCandidate(
+            url = "https://googleads.g.doubleclick.net/pagead/ads?video=1",
+            protocol = com.example.data.stream.model.StreamProtocol.PROGRESSIVE
+        )
+        val hlsCandidate = com.example.data.stream.model.StreamCandidate(
+            url = "https://stream.anichin.vip/hls/master.m3u8",
+            protocol = com.example.data.stream.model.StreamProtocol.HLS,
+            isDirectVideo = true,
+            isValidated = true
+        )
+        val ranked = com.example.data.stream.ranking.CandidateRanker.rankCandidates(listOf(adCandidate, hlsCandidate))
+        assertEquals(1, ranked.size)
+        assertEquals(hlsCandidate.url, ranked.first().url)
+    }
+
+    @Test
+    fun `test error classifier suggests NextCandidate before re-resolving or web fallback`() {
+        val cand1 = com.example.data.stream.model.StreamCandidate(
+            url = "https://server1.com/stream.m3u8",
+            protocol = com.example.data.stream.model.StreamProtocol.HLS
+        )
+        val cand2 = com.example.data.stream.model.StreamCandidate(
+            url = "https://server2.com/backup.m3u8",
+            protocol = com.example.data.stream.model.StreamProtocol.HLS
+        )
+        val session = PlaybackSession(
+            streamUrl = cand1.url,
+            serverName = "Server 1",
+            candidates = listOf(cand1, cand2),
+            currentCandidateIndex = 0
+        )
+        val dataSpec = androidx.media3.datasource.DataSpec(android.net.Uri.parse(cand1.url))
+        val http403 = HttpDataSource.InvalidResponseCodeException(
+            403, "Forbidden", null, emptyMap(), dataSpec, byteArrayOf()
+        )
+        val error = PlaybackException("HTTP 403", http403, PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS)
+
+        val action = PlaybackErrorClassifier.classify(error, session)
+        assertTrue("Expected NextCandidate action", action is PlaybackAction.NextCandidate)
+        assertEquals(cand2.url, (action as PlaybackAction.NextCandidate).candidate.url)
+    }
 }

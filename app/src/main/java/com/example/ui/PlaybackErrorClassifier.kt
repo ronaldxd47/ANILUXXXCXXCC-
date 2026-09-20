@@ -8,7 +8,7 @@ import androidx.media3.datasource.HttpDataSource
 
 /**
  * Classifier cerdas untuk menganalisis error pemutar Media3 / ExoPlayer
- * dan menentukan tindakan pemulihan yang tepat (Re-resolve, Retry, Fallback, atau Fatal Error).
+ * dan menentukan tindakan pemulihan yang tepat (NextCandidate, Re-resolve, Retry, Fallback, atau Fatal Error).
  */
 @OptIn(UnstableApi::class)
 object PlaybackErrorClassifier {
@@ -33,7 +33,11 @@ object PlaybackErrorClassifier {
             cause is HttpDataSource.CleartextNotPermittedException ||
             causeMsg.contains("Cleartext HTTP traffic", ignoreCase = true)
         ) {
-            return if (session.canFallbackToWeb) {
+            val nextCand = session.nextCandidate
+            return if (nextCand != null && nextCand.url.startsWith("https://")) {
+                Log.i(TAG, "Cleartext HTTP error, switching to HTTPS candidate: ${nextCand.url}")
+                PlaybackAction.NextCandidate(nextCand, "Mencoba sumber aman (HTTPS) alternatif...")
+            } else if (session.canFallbackToWeb) {
                 Log.i(TAG, "Cleartext HTTP error detected: recommending Web Sandbox fallback")
                 PlaybackAction.FallbackToWeb("Server menggunakan stream HTTP, beralih ke pemutar web...")
             } else {
@@ -43,7 +47,11 @@ object PlaybackErrorClassifier {
 
         if (httpCode == 401 || httpCode == 403 || error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS) {
             // Token expired atau CDN security block
-            return if (session.canReResolve) {
+            val nextCand = session.nextCandidate
+            return if (nextCand != null) {
+                Log.i(TAG, "HTTP ${httpCode ?: 403} on active stream, trying next candidate: ${nextCand.url}")
+                PlaybackAction.NextCandidate(nextCand, "Server menolak sumber utama, mencoba sumber alternatif...")
+            } else if (session.canReResolve) {
                 Log.i(TAG, "HTTP ${httpCode ?: 403} detected: recommending Re-resolve for fresh token")
                 PlaybackAction.ReResolve("Sesi token video kedaluwarsa (HTTP ${httpCode ?: 403}). Memperbarui URL...")
             } else if (session.canFallbackToWeb) {
@@ -62,13 +70,17 @@ object PlaybackErrorClassifier {
             }
         }
 
-        // 2. Manifest & Parser Corrupted (Bukan HLS standar atau terenkripsi custom)
+        // 2. Manifest & Parser Corrupted (Bukan HLS standar atau format asing)
         if (error.errorCode == PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED ||
             error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED ||
             causeMsg.contains("Cannot find sync byte", ignoreCase = true) ||
             causeMsg.contains("Input does not start with the #EXTM3U", ignoreCase = true)
         ) {
-            return if (session.canFallbackToWeb) {
+            val nextCand = session.nextCandidate
+            return if (nextCand != null) {
+                Log.i(TAG, "Malformed manifest on active stream, trying next candidate: ${nextCand.url}")
+                PlaybackAction.NextCandidate(nextCand, "Format tidak sesuai, mencoba sumber alternatif...")
+            } else if (session.canFallbackToWeb) {
                 Log.i(TAG, "Malformed manifest or non-standard container: falling back to Web Sandbox")
                 PlaybackAction.FallbackToWeb("Format stream membutuhkan pemutar web khusus")
             } else {
@@ -80,7 +92,10 @@ object PlaybackErrorClassifier {
         if (error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
             error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED
         ) {
-            return if (session.canFallbackToWeb) {
+            val nextCand = session.nextCandidate
+            return if (nextCand != null) {
+                PlaybackAction.NextCandidate(nextCand, "Decoder perangkat tidak kompatibel, mencoba format lain...")
+            } else if (session.canFallbackToWeb) {
                 PlaybackAction.FallbackToWeb("Codec perangkat tidak kompatibel, beralih ke web player...")
             } else {
                 PlaybackAction.FatalError("Codec video perangkat tidak kompatibel")
@@ -96,8 +111,11 @@ object PlaybackErrorClassifier {
         if (error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ||
             error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
         ) {
+            val nextCand = session.nextCandidate
             return if (session.canRetryExo) {
                 PlaybackAction.RetryExo(delayMs = 1500L)
+            } else if (nextCand != null) {
+                PlaybackAction.NextCandidate(nextCand, "Koneksi lambat, mencoba sumber cadangan...")
             } else if (session.canFallbackToWeb) {
                 PlaybackAction.FallbackToWeb("Koneksi ExoPlayer lambat, mencoba pemutar web alternatif...")
             } else {
@@ -106,7 +124,10 @@ object PlaybackErrorClassifier {
         }
 
         // 6. Generic Fallback
-        return if (session.canFallbackToWeb) {
+        val nextCand = session.nextCandidate
+        return if (nextCand != null) {
+            PlaybackAction.NextCandidate(nextCand, "Mencoba sumber video alternatif...")
+        } else if (session.canFallbackToWeb) {
             PlaybackAction.FallbackToWeb("Terjadi kendala pemutaran. Beralih ke pemutar web alternatif...")
         } else {
             PlaybackAction.FatalError("Gagal memutar video: ${error.errorCodeName}")

@@ -1578,6 +1578,7 @@ fun VideoPlayerWebView(
             AndroidView(
                 factory = { context ->
                     WebView(context).apply {
+                        setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
                         layoutParams = android.view.ViewGroup.LayoutParams(
                             android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                             android.view.ViewGroup.LayoutParams.MATCH_PARENT

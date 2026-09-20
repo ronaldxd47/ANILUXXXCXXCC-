@@ -84,8 +84,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
-import android.widget.VideoView
-import android.media.MediaPlayer
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 

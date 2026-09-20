@@ -1,17 +1,28 @@
 package com.example.data.stream
 
 import android.util.Log
+import com.example.data.stream.detector.ContainerSniffer
+import com.example.data.stream.detector.ProtocolDetector
+import com.example.data.stream.model.ContainerFormat
+import com.example.data.stream.model.StreamCandidate
+import com.example.data.stream.model.StreamProtocol
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.Headers
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
 
 /**
- * Service Layer untuk validasi integritas media stream (HLS/DASH/MP4).
- * Memeriksa HTTP status, Content-Type, dan byte signature (#EXTM3U / ftyp)
- * sebelum stream diserahkan ke ExoPlayer.
+ * Service Layer multi-stage validator untuk memverifikasi kelayakan stream media (HLS, DASH, MP4, WebM, MKV).
+ * Menggunakan pendekatan 8-tahap non-destruktif:
+ * 1. URL Sanity
+ * 2. HTTP Status & Connection
+ * 3. Redirect Tracking
+ * 4. Content-Type Inspection
+ * 5. Magic Byte / Manifest Signature Detection
+ * 6. Protocol Detection
+ * 7. Container Sniffing
+ * 8. Playability Confidence Scoring
  */
 object StreamValidator {
     private const val TAG = "StreamValidator"
@@ -19,14 +30,17 @@ object StreamValidator {
     private val probeClient = OkHttpClient.Builder()
         .followRedirects(true)
         .followSslRedirects(true)
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS)
+        .connectTimeout(7, TimeUnit.SECONDS)
+        .readTimeout(7, TimeUnit.SECONDS)
         .build()
 
     sealed class ValidationResult {
         data class Valid(
             val mediaType: StreamMediaType,
-            val contentType: String
+            val contentType: String,
+            val protocol: StreamProtocol = StreamProtocol.UNKNOWN,
+            val container: ContainerFormat = ContainerFormat.UNKNOWN,
+            val confidence: Float = 0.9f
         ) : ValidationResult()
 
         data class Invalid(
@@ -37,14 +51,14 @@ object StreamValidator {
     }
 
     /**
-     * Memvalidasi candidate URL secara asynchronous (suspend).
-     * Melakukan quick Range probe (1KB pertama) untuk memeriksa signature tanpa boros bandwidth.
+     * Memvalidasi stream URL secara asynchronous dengan header khusus.
      */
     suspend fun validateStream(
         url: String,
-        headers: Map<String, String>
+        headers: Map<String, String> = emptyMap()
     ): ValidationResult = withContext(Dispatchers.IO) {
-        if (url.isBlank() || !url.startsWith("http")) {
+        // Stage 1: URL sanity
+        if (url.isBlank() || (!url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true))) {
             return@withContext ValidationResult.Invalid(
                 statusCode = 0,
                 reason = "URL stream tidak valid atau kosong",
@@ -58,10 +72,10 @@ object StreamValidator {
                 !k.equals("Content-Length", ignoreCase = true)
             }
 
-            // Gunakan Range request agar hanya mengambil potongan awal (manifest header)
+            // Stage 2: HTTP probe (coba Range probe lebih dulu, bila CDN merespons 416 atau 200 tetap diproses)
             val requestBuilder = Request.Builder()
                 .url(url)
-                .header("Range", "bytes=0-2048")
+                .header("Range", "bytes=0-4096")
 
             safeHeaders.forEach { (k, v) ->
                 if (!k.equals("Range", ignoreCase = true)) {
@@ -73,10 +87,11 @@ object StreamValidator {
             response.use { resp ->
                 val code = resp.code
                 val contentType = resp.header("Content-Type", "")?.lowercase() ?: ""
+                val finalUrl = resp.request.url.toString()
 
-                // 1. Periksa HTTP status code
+                // Stage 3 & Status check
                 if (code == 401 || code == 403) {
-                    Log.w(TAG, "Probe HTTP $code on stream: $url (token expired/forbidden)")
+                    Log.w(TAG, "Probe HTTP $code on stream: $url (token expired or CDN forbidden)")
                     return@withContext ValidationResult.Invalid(
                         statusCode = code,
                         reason = "Akses ditolak oleh server CDN (HTTP $code)",
@@ -92,7 +107,7 @@ object StreamValidator {
                     )
                 }
 
-                if (code !in 200..299) {
+                if (code !in 200..299 && code != 206) {
                     return@withContext ValidationResult.Invalid(
                         statusCode = code,
                         reason = "Server mengembalikan kode error HTTP $code",
@@ -100,56 +115,19 @@ object StreamValidator {
                     )
                 }
 
-                // 2. Periksa Content-Type eksplisit
-                if (contentType.contains("application/vnd.apple.mpegurl") ||
-                    contentType.contains("application/x-mpegurl") ||
-                    contentType.contains("audio/x-mpegurl")
-                ) {
-                    return@withContext ValidationResult.Valid(
-                        mediaType = StreamMediaType.HLS,
-                        contentType = contentType
-                    )
-                }
+                // Stage 4: Content-Type Inspection
+                var protocol = ProtocolDetector.detect(finalUrl, contentType, "")
 
-                if (contentType.contains("application/dash+xml")) {
-                    return@withContext ValidationResult.Valid(
-                        mediaType = StreamMediaType.DASH,
-                        contentType = contentType
-                    )
-                }
-
-                if (contentType.contains("video/mp4") || contentType.contains("video/webm") || contentType.contains("video/mkv")) {
-                    return@withContext ValidationResult.Valid(
-                        mediaType = StreamMediaType.MP4,
-                        contentType = contentType
-                    )
-                }
-
-                // 3. Fallback: Baca sample byte signature
+                // Stage 5: Small body sample (maksimal 4KB)
                 val bodyBytes = resp.body?.bytes() ?: byteArrayOf()
-                val bodyText = if (bodyBytes.isNotEmpty()) {
-                    String(bodyBytes, Charsets.UTF_8).take(1024)
+                val bodySnippet = if (bodyBytes.isNotEmpty()) {
+                    String(bodyBytes, Charsets.UTF_8).take(2048)
                 } else ""
 
-                // Deteksi HLS signature (#EXTM3U)
-                if (bodyText.contains("#EXTM3U") || bodyText.contains("#EXT-X-STREAM-INF") || bodyText.contains("#EXT-X-TARGETDURATION")) {
-                    Log.d(TAG, "Stream validated via #EXTM3U manifest signature: $url")
-                    return@withContext ValidationResult.Valid(
-                        mediaType = StreamMediaType.HLS,
-                        contentType = contentType.ifEmpty { "application/vnd.apple.mpegurl" }
-                    )
-                }
-
-                // Deteksi DASH signature (<MPD)
-                if (bodyText.contains("<MPD", ignoreCase = true)) {
-                    return@withContext ValidationResult.Valid(
-                        mediaType = StreamMediaType.DASH,
-                        contentType = contentType.ifEmpty { "application/dash+xml" }
-                    )
-                }
-
-                // Deteksi jika respon adalah HTML error page (Cloudflare challenge, bot block, dsb.)
-                if (bodyText.contains("<!DOCTYPE html", ignoreCase = true) || bodyText.contains("<html", ignoreCase = true)) {
+                // Deteksi jika respon adalah halaman web HTML (Cloudflare challenge, bot block)
+                if (bodySnippet.contains("<!DOCTYPE html", ignoreCase = true) ||
+                    bodySnippet.contains("<html", ignoreCase = true)
+                ) {
                     Log.w(TAG, "Candidate stream returned HTML web page instead of media: $url")
                     return@withContext ValidationResult.Invalid(
                         statusCode = code,
@@ -158,41 +136,87 @@ object StreamValidator {
                     )
                 }
 
-                // Deteksi MP4 ftyp box signature
-                if (bodyBytes.size >= 12) {
-                    val boxType = String(bodyBytes.sliceArray(4..7), Charsets.US_ASCII)
-                    if (boxType == "ftyp" || boxType == "moov") {
-                        return@withContext ValidationResult.Valid(
-                            mediaType = StreamMediaType.MP4,
-                            contentType = contentType.ifEmpty { "video/mp4" }
-                        )
+                // Stage 6: Protocol detection dari manifest signature
+                if (protocol == StreamProtocol.UNKNOWN || protocol == StreamProtocol.PROGRESSIVE) {
+                    val detectedFromSample = ProtocolDetector.detect(finalUrl, contentType, bodySnippet)
+                    if (detectedFromSample != StreamProtocol.UNKNOWN) {
+                        protocol = detectedFromSample
                     }
                 }
 
-                // 4. URL Extension heuristic jika Content-Type generik (e.g. application/octet-stream)
-                val lowerUrl = url.lowercase()
-                return@withContext when {
-                    lowerUrl.contains(".m3u8") -> ValidationResult.Valid(StreamMediaType.HLS, contentType)
-                    lowerUrl.contains(".mpd") -> ValidationResult.Valid(StreamMediaType.DASH, contentType)
-                    lowerUrl.contains(".mp4") || lowerUrl.contains("videoplayback") -> ValidationResult.Valid(StreamMediaType.MP4, contentType)
-                    else -> ValidationResult.Valid(StreamMediaType.UNKNOWN, contentType)
+                // Stage 7: Container sniffing
+                val container = ContainerSniffer.sniff(bodyBytes, finalUrl)
+
+                // Stage 8: Confidence & mapping
+                val mappedMediaType = when (protocol) {
+                    StreamProtocol.HLS -> StreamMediaType.HLS
+                    StreamProtocol.DASH -> StreamMediaType.DASH
+                    StreamProtocol.PROGRESSIVE -> StreamMediaType.MP4
+                    else -> {
+                        if (container.isDirectVideo) StreamMediaType.MP4 else StreamMediaType.UNKNOWN
+                    }
                 }
+
+                return@withContext ValidationResult.Valid(
+                    mediaType = mappedMediaType,
+                    contentType = contentType.ifEmpty { container.defaultMime },
+                    protocol = protocol,
+                    container = container,
+                    confidence = 0.95f
+                )
             }
         } catch (e: Exception) {
             Log.w(TAG, "Stream probe error for $url: ${e.message}")
-            // Jika probe network gagal karena koneksi lambat, jangan langsung blokir jika URL jelas .m3u8
+            // Fallback gracefully bila probe jaringan timeout tapi ekstensi URL jelas
             val lower = url.lowercase()
-            return@withContext if (lower.contains(".m3u8")) {
-                ValidationResult.Valid(StreamMediaType.HLS, "application/vnd.apple.mpegurl")
-            } else if (lower.contains(".mp4")) {
-                ValidationResult.Valid(StreamMediaType.MP4, "video/mp4")
-            } else {
-                ValidationResult.Invalid(
+            return@withContext when {
+                lower.contains(".m3u8") -> ValidationResult.Valid(
+                    mediaType = StreamMediaType.HLS,
+                    contentType = "application/vnd.apple.mpegurl",
+                    protocol = StreamProtocol.HLS,
+                    container = ContainerFormat.MPEG_TS,
+                    confidence = 0.6f
+                )
+                lower.contains(".mpd") -> ValidationResult.Valid(
+                    mediaType = StreamMediaType.DASH,
+                    contentType = "application/dash+xml",
+                    protocol = StreamProtocol.DASH,
+                    container = ContainerFormat.FMP4,
+                    confidence = 0.6f
+                )
+                lower.contains(".mp4") -> ValidationResult.Valid(
+                    mediaType = StreamMediaType.MP4,
+                    contentType = "video/mp4",
+                    protocol = StreamProtocol.PROGRESSIVE,
+                    container = ContainerFormat.MP4,
+                    confidence = 0.6f
+                )
+                else -> ValidationResult.Invalid(
                     statusCode = 0,
                     reason = "Gagal memverifikasi stream: ${e.message}",
                     isTokenExpired = false
                 )
             }
+        }
+    }
+
+    /**
+     * Memvalidasi objek StreamCandidate secara menyeluruh.
+     */
+    suspend fun validateCandidate(candidate: StreamCandidate): StreamCandidate {
+        val result = validateStream(candidate.url, candidate.requestPolicy.toSafeHeaderMap())
+        return when (result) {
+            is ValidationResult.Valid -> candidate.copy(
+                protocol = if (candidate.protocol == StreamProtocol.UNKNOWN) result.protocol else candidate.protocol,
+                container = if (candidate.container == ContainerFormat.UNKNOWN) result.container else candidate.container,
+                mimeType = result.contentType,
+                isValidated = true,
+                confidence = result.confidence
+            )
+            is ValidationResult.Invalid -> candidate.copy(
+                isValidated = false,
+                confidence = 0.1f
+            )
         }
     }
 }

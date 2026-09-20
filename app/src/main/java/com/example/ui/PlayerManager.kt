@@ -21,6 +21,10 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import com.example.data.stream.ResolvedStream
 import com.example.data.stream.StreamMediaType
+import com.example.data.stream.detector.ProtocolDetector
+import com.example.data.stream.model.ContainerFormat
+import com.example.data.stream.model.StreamCandidate
+import com.example.data.stream.model.StreamProtocol
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -249,24 +253,28 @@ class PlayerManager private constructor(context: Context) {
             val mediaItemBuilder = MediaItem.Builder().setUri(uri)
 
             val lower = stream.url.lowercase()
-            val mimeType: String? = when (stream.mediaType) {
-                StreamMediaType.HLS -> {
-                    if (lower.contains(".m3u8") || stream.contentType.contains("mpegurl", ignoreCase = true)) {
-                        MimeTypes.APPLICATION_M3U8
-                    } else {
-                        null // Allow DefaultMediaSourceFactory container sniffing (MP4, MKV, WebM, HLS)
-                    }
-                }
-                StreamMediaType.DASH -> MimeTypes.APPLICATION_MPD
-                StreamMediaType.MP4 -> MimeTypes.VIDEO_MP4
-                else -> {
+            val detectedProtocol = when (stream.mediaType) {
+                StreamMediaType.HLS -> StreamProtocol.HLS
+                StreamMediaType.DASH -> StreamProtocol.DASH
+                StreamMediaType.MP4 -> StreamProtocol.PROGRESSIVE
+                else -> ProtocolDetector.detect(stream.url, stream.contentType, "")
+            }
+
+            val mimeType: String? = when (detectedProtocol) {
+                StreamProtocol.HLS -> MimeTypes.APPLICATION_M3U8
+                StreamProtocol.DASH -> MimeTypes.APPLICATION_MPD
+                StreamProtocol.SMOOTH_STREAMING -> "application/vnd.ms-sstr+xml"
+                StreamProtocol.RTSP -> "application/x-rtsp"
+                StreamProtocol.PROGRESSIVE -> {
                     when {
-                        lower.contains(".m3u8") -> MimeTypes.APPLICATION_M3U8
-                        lower.contains(".mpd") -> MimeTypes.APPLICATION_MPD
-                        lower.endsWith(".mp4") || lower.contains(".mp4?") || lower.contains("videoplayback") -> MimeTypes.VIDEO_MP4
-                        else -> null // Container auto-detection
+                        lower.contains(".webm") || stream.contentType.contains("webm", ignoreCase = true) -> MimeTypes.VIDEO_WEBM
+                        lower.contains(".mkv") || stream.contentType.contains("matroska", ignoreCase = true) -> MimeTypes.VIDEO_MATROSKA
+                        lower.contains(".ts") || stream.contentType.contains("mp2t", ignoreCase = true) -> MimeTypes.VIDEO_MP2T
+                        lower.endsWith(".mp4") || lower.contains(".mp4?") || stream.contentType.contains("mp4", ignoreCase = true) -> MimeTypes.VIDEO_MP4
+                        else -> null // Auto-detection by Media3 extractors
                     }
                 }
+                else -> null
             }
             if (mimeType != null) {
                 mediaItemBuilder.setMimeType(mimeType)
@@ -316,12 +324,27 @@ class PlayerManager private constructor(context: Context) {
     }
 
     /**
-     * Overload for raw URL string.
+     * Mempersiapkan media langsung dari [StreamCandidate] dengan kebijakan header granular.
+     */
+    @Synchronized
+    fun prepareCandidate(candidate: StreamCandidate, playWhenReady: Boolean = true) {
+        prepareStream(candidate.toResolvedStream(), playWhenReady)
+    }
+
+    /**
+     * Overload for raw URL string using intelligent ProtocolDetector instead of guessing MP4.
      */
     fun prepareMedia(mediaUrl: String, playWhenReady: Boolean = true) {
+        val protocol = ProtocolDetector.detect(mediaUrl, "", "")
+        val mediaType = when (protocol) {
+            StreamProtocol.HLS -> StreamMediaType.HLS
+            StreamProtocol.DASH -> StreamMediaType.DASH
+            StreamProtocol.PROGRESSIVE -> StreamMediaType.MP4
+            else -> StreamMediaType.UNKNOWN
+        }
         val stream = ResolvedStream(
             url = mediaUrl,
-            mediaType = if (mediaUrl.lowercase().contains(".m3u8")) StreamMediaType.HLS else StreamMediaType.MP4,
+            mediaType = mediaType,
             isDirectVideo = true
         )
         prepareStream(stream, playWhenReady)
