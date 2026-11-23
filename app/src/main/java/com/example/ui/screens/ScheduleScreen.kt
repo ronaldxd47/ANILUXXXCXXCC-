@@ -1,346 +1,291 @@
 package com.example.ui.screens
 
-import androidx.compose.animation.*
-import androidx.compose.animation.core.*
-import androidx.compose.foundation.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.*
-import androidx.compose.foundation.lazy.grid.*
-import androidx.compose.foundation.shape.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.*
-import androidx.compose.ui.draw.*
-import androidx.compose.ui.graphics.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.*
-import androidx.compose.ui.unit.*
-import coil.compose.AsyncImage
+import androidx.compose.ui.unit.dp
+import com.example.data.AnimeSource
+import com.example.data.ScheduleDay
+import com.example.data.ScrapedAnime
 import com.example.ui.AnimeViewModel
 import com.example.ui.Screen
 import com.example.ui.UiState
-import com.example.data.*
 import com.example.ui.components.*
+import com.example.ui.theme.AmberContainer
+import com.example.ui.theme.AmberGold
+import com.example.ui.theme.JadeContainer
+import com.example.ui.theme.JadeVerified
+import java.util.Calendar
 
 @Composable
 fun ScheduleScreen(viewModel: AnimeViewModel) {
     val currentDayName = remember {
-        val calendar = java.util.Calendar.getInstance()
-        when (calendar.get(java.util.Calendar.DAY_OF_WEEK)) {
-            java.util.Calendar.MONDAY -> "Senin"
-            java.util.Calendar.TUESDAY -> "Selasa"
-            java.util.Calendar.WEDNESDAY -> "Rabu"
-            java.util.Calendar.THURSDAY -> "Kamis"
-            java.util.Calendar.FRIDAY -> "Jumat"
-            java.util.Calendar.SATURDAY -> "Sabtu"
-            java.util.Calendar.SUNDAY -> "Minggu"
+        when (Calendar.getInstance().get(Calendar.DAY_OF_WEEK)) {
+            Calendar.MONDAY -> "Senin"
+            Calendar.TUESDAY -> "Selasa"
+            Calendar.WEDNESDAY -> "Rabu"
+            Calendar.THURSDAY -> "Kamis"
+            Calendar.FRIDAY -> "Jumat"
+            Calendar.SATURDAY -> "Sabtu"
+            Calendar.SUNDAY -> "Minggu"
             else -> "Senin"
         }
     }
     var selectedDay by remember { mutableStateOf(currentDayName) }
     val days = listOf("Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu", "Acak")
-    
+
     val scheduleState by viewModel.scheduleState.collectAsState()
     val trendingAnime by viewModel.trendingAnime.collectAsState()
-    val latestUpdatesState by viewModel.latestUpdates.collectAsState()
-    val latestUpdates = latestUpdatesState
-    
-    // 1. Old reliable deterministic fallback list
-    val displayedFallbackAnime = remember(selectedDay, trendingAnime, latestUpdates) {
-        val dayIndex = days.indexOf(selectedDay)
-        val sourceList = if (trendingAnime.isNotEmpty()) {
-            trendingAnime
-        } else if (latestUpdates is UiState.Success) {
-            latestUpdates.data
-        } else {
-            emptyList()
-        }
-        
-        if (sourceList.isEmpty()) {
-            emptyList()
-        } else {
-            // Filter deterministically so every day has a different set of real anime/donghua
-            sourceList.filterIndexed { index, _ -> 
-                (index + dayIndex) % 3 == 0 
-            }
-        }
-    }
-    
-    // 2. Resolve displayed list based on schedule state
-    val displayedAnime = remember(scheduleState, selectedDay, trendingAnime, latestUpdates, displayedFallbackAnime) {
-        var list: List<com.example.data.ScrapedAnime> = emptyList()
-        
-        if (scheduleState is UiState.Success) {
-            val allDays = (scheduleState as UiState.Success<List<com.example.data.ScheduleDay>>).data
-            val dayData = allDays.find { 
-                it.day.replace("'", "").equals(selectedDay, ignoreCase = true) 
-            }
-            if (dayData != null && dayData.animeList.isNotEmpty()) {
-                list = dayData.animeList.map { anime ->
-                    val titleClean = anime.title.replace("[SVIP]", "").trim()
-                    var imgUrl = anime.imageUrl
-                    
-                    // Fuzzy matching to find actual image URL from other sources if missing
-                    if (imgUrl.isEmpty()) {
-                        val matchTrending = trendingAnime.find { 
-                            it.link == anime.link || 
-                            it.title.contains(titleClean, ignoreCase = true) || 
-                            titleClean.contains(it.title, ignoreCase = true) 
-                        }
-                        if (matchTrending != null) {
-                            imgUrl = matchTrending.imageUrl
-                        } else if (latestUpdates is UiState.Success) {
-                            val matchLatest = latestUpdates.data.find { 
-                                it.link == anime.link || 
-                                it.title.contains(titleClean, ignoreCase = true) || 
-                                titleClean.contains(it.title, ignoreCase = true) 
-                            }
-                            if (matchLatest != null) {
-                                imgUrl = matchLatest.imageUrl
-                            }
-                        }
-                    }
-                    
-                    // Smart handpicked high-quality poster fallback
-                    if (imgUrl.isEmpty()) {
-                        val lowerTitle = titleClean.lowercase()
-                        imgUrl = when {
-                            lowerTitle.contains("renegade immortal") || lowerTitle.contains("renegade") -> "https://anichin.moe/wp-content/uploads/2023/09/Renegade-Immortal-Poster.jpg"
-                            lowerTitle.contains("btth") || lowerTitle.contains("battle through the heavens") -> "https://anichin.moe/wp-content/uploads/2022/07/Battle-Through-The-Heavens-Season-5-Poster.jpg"
-                            lowerTitle.contains("perfect world") -> "https://anichin.moe/wp-content/uploads/2021/04/Perfect-World-Poster.jpg"
-                            lowerTitle.contains("soul land") -> "https://anichin.moe/wp-content/uploads/2023/06/Soul-Land-2-Poster.jpg"
-                            lowerTitle.contains("swallowed star") -> "https://anichin.moe/wp-content/uploads/2020/11/Swallowed-Star-Poster.jpg"
-                            lowerTitle.contains("apotheosis") -> "https://anichin.moe/wp-content/uploads/2022/11/Apotheosis-Poster.jpg"
-                            lowerTitle.contains("shrouding the heavens") -> "https://anichin.moe/wp-content/uploads/2023/05/Shrouding-the-Heavens-Poster.jpg"
-                            lowerTitle.contains("martial master") -> "https://anichin.moe/wp-content/uploads/2020/03/Martial-Master-Poster.jpg"
-                            lowerTitle.contains("100.000 years") || lowerTitle.contains("refined qi") || lowerTitle.contains("refining qi") -> "https://anichin.moe/wp-content/uploads/2023/02/100000-Years-Refining-Qi-Poster.jpg"
-                            lowerTitle.contains("against the gods") -> "https://anichin.moe/wp-content/uploads/2023/09/Against-the-Gods-Poster.jpg"
-                            lowerTitle.contains("great ruler") -> "https://anichin.moe/wp-content/uploads/2023/07/The-Great-Ruler-Poster.jpg"
-                            lowerTitle.contains("supreme god emperor") -> "https://anichin.moe/wp-content/uploads/2020/09/Supreme-God-Emperor-Poster.jpg"
-                            lowerTitle.contains("against sky supreme") || lowerTitle.contains("against the sky") -> "https://anichin.moe/wp-content/uploads/2021/06/Against-the-Sky-Supreme-Poster.jpg"
-                            lowerTitle.contains("legend of martial immortal") -> "https://anichin.moe/wp-content/uploads/2023/11/Legend-of-Martial-Immortal-Poster.jpg"
-                            else -> "https://anichin.moe/wp-content/uploads/2023/09/Renegade-Immortal-Poster.jpg"
-                        }
-                    }
+    val latestUpdates by viewModel.latestUpdates.collectAsState()
 
-                    // Extract exact episode number if present, or find from latest update match
-                    var episodeStr = if (anime.episode.isNotBlank() && anime.episode != "Episode ?") {
-                        anime.episode
-                    } else {
-                        val matchLatest = if (latestUpdates is UiState.Success) {
-                            latestUpdates.data.find { it.link == anime.link || it.title.contains(titleClean, ignoreCase = true) || titleClean.contains(it.title, ignoreCase = true) }
-                        } else null
-                        val matchTrending = trendingAnime.find { it.link == anime.link || it.title.contains(titleClean, ignoreCase = true) || titleClean.contains(it.title, ignoreCase = true) }
-                        
-                        matchLatest?.episode?.takeIf { it.isNotBlank() && it != "Episode ?" }
-                            ?: matchTrending?.episode?.takeIf { it.isNotBlank() && it != "Episode ?" }
-                            ?: "Update $selectedDay"
-                    }
-                    if (!episodeStr.contains("Episode", ignoreCase = true) && !episodeStr.contains("Ep", ignoreCase = true) && episodeStr.contains(Regex("^\\d+$"))) {
-                        episodeStr = "Episode $episodeStr"
-                    }
-
-                    val isToday = selectedDay.equals(currentDayName, ignoreCase = true)
-                    val statusTag = if (isToday) "HARI INI" else "RILIS $selectedDay"
-                    
-                    com.example.data.ScrapedAnime(
-                        title = titleClean,
-                        link = anime.link,
-                        imageUrl = imgUrl,
-                        status = statusTag,
-                        episode = episodeStr,
-                        score = "N/A",
-                        type = if (anime.source.isNotBlank()) anime.source.uppercase() else "DONGHUA"
-                    )
-                }
-            }
-        }
-        
-        // If the live schedule list is empty, seamlessly use fallback recommendation list
-        if (list.isEmpty()) {
-            displayedFallbackAnime
-        } else {
-            list
-        }
-    }
-    
     val isUsingLiveSchedule = remember(scheduleState, selectedDay) {
-        if (scheduleState is UiState.Success) {
-            val allDays = (scheduleState as UiState.Success<List<com.example.data.ScheduleDay>>).data
-            val dayData = allDays.find { 
-                it.day.replace("'", "").equals(selectedDay, ignoreCase = true) 
+        val allDays = (scheduleState as? UiState.Success<List<ScheduleDay>>)?.data.orEmpty()
+        val dayData = allDays.find { it.day.replace("'", "").equals(selectedDay, ignoreCase = true) }
+        dayData != null && dayData.animeList.isNotEmpty()
+    }
+
+    val displayedAnime = remember(scheduleState, selectedDay, trendingAnime, latestUpdates) {
+        val allDays = (scheduleState as? UiState.Success<List<ScheduleDay>>)?.data.orEmpty()
+        val dayData = allDays.find { it.day.replace("'", "").equals(selectedDay, ignoreCase = true) }
+
+        val liveList = if (dayData != null && dayData.animeList.isNotEmpty()) {
+            val latestList = (latestUpdates as? UiState.Success)?.data.orEmpty()
+            dayData.animeList.map { anime ->
+                val titleClean = anime.title.replace("[SVIP]", "").trim()
+                val matchedItem = (trendingAnime + latestList).firstOrNull {
+                    it.link == anime.link ||
+                        it.title.equals(titleClean, ignoreCase = true) ||
+                        (titleClean.length > 4 && it.title.contains(titleClean, ignoreCase = true))
+                }
+                val imgUrl = anime.imageUrl.ifBlank { matchedItem?.imageUrl.orEmpty() }
+                val epLabel = anime.episode.takeIf { it.isNotBlank() && it != "Episode ?" }
+                    ?: matchedItem?.episode?.takeIf { it.isNotBlank() && it != "Episode ?" }
+                    ?: "Jadwal $selectedDay"
+
+                ScrapedAnime(
+                    title = titleClean,
+                    link = anime.link,
+                    imageUrl = imgUrl,
+                    status = if (selectedDay.equals(currentDayName, ignoreCase = true)) "Hari Ini" else selectedDay,
+                    episode = epLabel,
+                    score = "",
+                    type = if (AnimeSource.isDonghuaUrl(anime.link) || anime.source.equals("anichin", true) || anime.source.equals("donghub", true)) "Donghua" else "Anime"
+                )
             }
-            dayData != null && dayData.animeList.isNotEmpty()
         } else {
-            false
+            emptyList()
+        }
+
+        if (liveList.isNotEmpty()) {
+            liveList
+        } else {
+            val dayIndex = days.indexOf(selectedDay).coerceAtLeast(0)
+            val fallbackPool = trendingAnime.ifEmpty { (latestUpdates as? UiState.Success)?.data.orEmpty() }
+            fallbackPool.filterIndexed { index, _ -> (index + dayIndex) % 3 == 0 }
         }
     }
-    
-    Column(
+
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF121212))
-            .padding(horizontal = 16.dp)
+            .background(MaterialTheme.colorScheme.background)
     ) {
-        Spacer(modifier = Modifier.statusBarsPadding())
-        
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Jadwal Rilis",
-                color = Color.White,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { viewModel.fetchScheduleData() }) {
-                    Icon(
-                        imageVector = Icons.Filled.Refresh,
-                        contentDescription = "Refresh Jadwal",
-                        tint = Color(0xFFE53935)
+        val gridColumns = responsiveGridColumns(maxWidth)
+
+        Column(modifier = Modifier.fillMaxSize()) {
+            Spacer(modifier = Modifier.statusBarsPadding())
+
+            // Header
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 14.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "Jadwal Rilis",
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = MaterialTheme.colorScheme.onBackground
+                    )
+                    Text(
+                        text = "$selectedDay • ${displayedAnime.size} judul",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Spacer(modifier = Modifier.width(8.dp))
-                IconButton(onClick = { viewModel.navigateTo(Screen.Search) }) {
-                    Icon(
-                        imageVector = Icons.Filled.Search,
-                        contentDescription = "Cari Anime",
-                        tint = Color(0xFFE53935)
-                    )
-                }
-            }
-        }
-        
-        Row(modifier = Modifier.fillMaxSize()) {
-            // Left content area (Schedule List)
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-            ) {
-                Column(modifier = Modifier.fillMaxSize()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = selectedDay,
-                            color = Color(0xFFE53935),
-                            fontSize = 24.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "(${displayedAnime.size} Anime)",
-                            color = Color.LightGray,
-                            fontSize = 15.sp,
-                            modifier = Modifier.align(Alignment.Bottom)
-                        )
-                        
-                        Spacer(modifier = Modifier.weight(1f))
-                        
-                        // Status badge (Official vs Fallback Recommendation)
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(if (isUsingLiveSchedule) Color(0xFF2E7D32).copy(alpha = 0.2f) else Color(0xFFE53935).copy(alpha = 0.15f))
-                                .border(1.dp, if (isUsingLiveSchedule) Color(0xFF4CAF50).copy(alpha = 0.5f) else Color(0xFFE53935).copy(alpha = 0.4f), RoundedCornerShape(6.dp))
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Text(
-                                text = if (isUsingLiveSchedule) "JADWAL RESMI" else "REKOMENDASI",
-                                color = if (isUsingLiveSchedule) Color(0xFF4CAF50) else Color(0xFFE53935),
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                    
-                    if (displayedAnime.isEmpty()) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(16.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.DateRange,
-                                contentDescription = "No Schedule",
-                                tint = Color.DarkGray,
-                                modifier = Modifier.size(64.dp)
-                            )
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Text(
-                                text = "Tidak ada jadwal tayang untuk hari $selectedDay",
-                                color = Color.Gray,
-                                textAlign = TextAlign.Center,
-                                fontSize = 15.sp
-                            )
-                        }
-                    } else {
-                        androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
-                            columns = androidx.compose.foundation.lazy.grid.GridCells.Fixed(2),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(16.dp),
-                            contentPadding = PaddingValues(top = 0.dp, bottom = 100.dp)
-                        ) {
-                            items(displayedAnime.size, key = { index -> displayedAnime[index].title + displayedAnime[index].link }) { index ->
-                                val anime = displayedAnime[index]
-                                CompactAnimeCard(
-                                    anime = anime,
-                                    onClick = {
-                                        if (anime.link.contains("myanimelist.net")) {
-                                            viewModel.performSearch(anime.title)
-                                            viewModel.navigateTo(Screen.Search)
-                                        } else {
-                                            viewModel.selectAnime(anime.link)
-                                        }
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-            
-            Spacer(modifier = Modifier.width(12.dp))
-            
-            // Right Sidebar (Days list selector)
-            Column(
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier
-                    .width(80.dp)
-                    .fillMaxHeight()
-                    .verticalScroll(rememberScrollState())
-                    .padding(bottom = 100.dp)
-            ) {
-                days.forEach { day ->
-                    val isSelected = selectedDay == day
+
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Honest Source Verification Badge
                     Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (isSelected) Color(0xFF7000FF) else Color(0xFF1B1E2E))
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isUsingLiveSchedule) JadeContainer else AmberContainer)
+                            .border(
+                                1.dp,
+                                if (isUsingLiveSchedule) JadeVerified.copy(alpha = 0.5f) else AmberGold.copy(alpha = 0.5f),
+                                RoundedCornerShape(8.dp)
+                            )
+                            .padding(horizontal = 8.dp, vertical = 5.dp)
+                    ) {
+                        Text(
+                            text = if (isUsingLiveSchedule) "RESMI" else "REKOMENDASI",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isUsingLiveSchedule) JadeVerified else AmberGold,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    IconButton(
+                        onClick = { viewModel.fetchScheduleData(forceRefresh = true) },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("schedule_refresh_btn")
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.surfaceContainer)
+                                .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Refresh,
+                                contentDescription = "Muat Ulang Jadwal",
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+
+                    IconButton(
+                        onClick = { viewModel.navigateTo(Screen.Search) },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("schedule_search_btn")
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.surfaceContainer)
+                                .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Search,
+                                contentDescription = "Cari",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Horizontal Top Day Chips
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(bottom = 16.dp)
+            ) {
+                items(days, key = { it }) { day ->
+                    val selected = selectedDay == day
+                    val isToday = day.equals(currentDayName, ignoreCase = true)
+                    Box(
+                        modifier = Modifier
+                            .defaultMinSize(minHeight = 40.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(
+                                if (selected) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.surfaceContainer
+                            )
+                            .border(
+                                1.dp,
+                                if (selected) MaterialTheme.colorScheme.primary
+                                else if (isToday) MaterialTheme.colorScheme.secondary.copy(alpha = 0.5f)
+                                else MaterialTheme.colorScheme.outline,
+                                RoundedCornerShape(10.dp)
+                            )
                             .clickable { selectedDay = day }
-                            .padding(vertical = 12.dp),
+                            .padding(horizontal = 16.dp, vertical = 10.dp)
+                            .testTag("schedule_day_$day"),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = day,
-                            color = if (isSelected) Color.White else Color.LightGray,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                            fontSize = 13.sp
+                            text = if (isToday) "$day • Hari Ini" else day,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = if (selected) Color.White else MaterialTheme.colorScheme.onSurface
                         )
+                    }
+                }
+            }
+
+            // Content
+            when {
+                scheduleState is UiState.Loading && displayedAnime.isEmpty() -> {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(gridColumns),
+                        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        items(6) {
+                            SkeletonBox(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(0.68f)
+                            )
+                        }
+                    }
+                }
+
+                displayedAnime.isEmpty() -> {
+                    EmptyStateView(
+                        title = "Belum ada jadwal untuk $selectedDay",
+                        subtitle = "Coba muat ulang jadwal atau pilih hari lain.",
+                        icon = Icons.Filled.DateRange,
+                        actionLabel = "Muat Ulang",
+                        onAction = { viewModel.fetchScheduleData(forceRefresh = true) }
+                    )
+                }
+
+                else -> {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(gridColumns),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 32.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        items(displayedAnime, key = { it.link + it.title }) { anime ->
+                            MediaPosterCard(
+                                anime = anime,
+                                onClick = { viewModel.selectAnime(anime.link) }
+                            )
+                        }
                     }
                 }
             }

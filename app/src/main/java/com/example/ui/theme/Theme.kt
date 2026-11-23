@@ -1,50 +1,70 @@
 package com.example.ui.theme
 
-import androidx.compose.ui.graphics.Color
 import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 
-private val DarkColorScheme =
-  darkColorScheme(
-    primary = AccentPrimary,
-    secondary = AccentCyan,
-    tertiary = AccentPink,
-    background = CharcoalBg,
-    surface = CharcoalSurface,
-    surfaceVariant = CharcoalSurfaceVariant,
+private val EditorialDarkColorScheme = darkColorScheme(
+    primary = CrimsonPrimary,
     onPrimary = Color.White,
-    onSecondary = Color.Black,
-    onTertiary = Color.White,
+    primaryContainer = CrimsonContainer,
+    onPrimaryContainer = Color(0xFFFFD9E2),
+    secondary = SkyAccent,
+    onSecondary = ObsidianBg,
+    secondaryContainer = SkyContainer,
+    onSecondaryContainer = Color(0xFFE0F2FE),
+    tertiary = AmberGold,
+    onTertiary = ObsidianBg,
+    tertiaryContainer = AmberContainer,
+    onTertiaryContainer = Color(0xFFFEF3C7),
+    background = ObsidianBg,
     onBackground = TextPrimary,
+    surface = ObsidianSurface,
     onSurface = TextPrimary,
+    surfaceVariant = ObsidianSurfaceHigh,
     onSurfaceVariant = TextSecondary,
-  )
+    surfaceContainerLowest = ObsidianBg,
+    surfaceContainerLow = ObsidianSurface,
+    surfaceContainer = ObsidianSurfaceHigh,
+    surfaceContainerHigh = ObsidianSurfaceElevated,
+    outline = ObsidianBorder,
+    outlineVariant = Color(0xFF1F222C),
+    error = Color(0xFFFB7185),
+    onError = Color.Black
+)
 
-private val LightColorScheme = DarkColorScheme // Force dark theme for this app
+val AppShapes = Shapes(
+    extraSmall = RoundedCornerShape(6.dp),
+    small = RoundedCornerShape(10.dp),
+    medium = RoundedCornerShape(14.dp),
+    large = RoundedCornerShape(18.dp),
+    extraLarge = RoundedCornerShape(24.dp)
+)
 
 @Composable
 fun MyApplicationTheme(
-  darkTheme: Boolean = true, // Default to dark theme
-  dynamicColor: Boolean = false, // Disable dynamic color to enforce our premium theme
-  content: @Composable () -> Unit,
+    darkTheme: Boolean = true,
+    dynamicColor: Boolean = false,
+    content: @Composable () -> Unit
 ) {
-  val colorScheme =
-    when {
-      dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-        val context = LocalContext.current
-        if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-      }
-
-      darkTheme -> DarkColorScheme
-      else -> LightColorScheme
+    val colorScheme = when {
+        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+            dynamicDarkColorScheme(LocalContext.current)
+        }
+        else -> EditorialDarkColorScheme
     }
 
-  MaterialTheme(colorScheme = colorScheme, typography = Typography, content = content)
+    MaterialTheme(
+        colorScheme = colorScheme,
+        typography = Typography,
+        shapes = AppShapes,
+        content = content
+    )
 }

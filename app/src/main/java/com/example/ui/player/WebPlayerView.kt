@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -38,9 +39,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import org.json.JSONObject
 
 /**
- * Sandboxed Web Player dengan hardware/software fallback, custom User-Agent,
+ * Sandboxed Web Player dengan custom User-Agent,
  * penanganan navigasi anti-iklan/intent, injeksi CSS video fullscreen,
  * dan embedded HLS.js HTML5 runtime untuk URL stream langsung.
  */
@@ -59,9 +61,11 @@ fun WebPlayerView(
 ) {
     var webViewInstance by remember { mutableStateOf<WebView?>(null) }
     var isLoading by remember(url) { mutableStateOf(true) }
-    var loadProgress by remember(url) { mutableStateOf(0) }
+    var loadProgress by remember(url) { mutableIntStateOf(0) }
+    var renderEpoch by remember(url) { mutableIntStateOf(0) }
+    var rendererCrashed by remember(url) { mutableStateOf(false) }
 
-    DisposableEffect(url) {
+    DisposableEffect(url, renderEpoch) {
         onDispose {
             try {
                 webViewInstance?.let { wv ->
@@ -70,6 +74,7 @@ fun WebPlayerView(
                     wv.webChromeClient = null
                     wv.webViewClient = object : WebViewClient() {}
                     (wv.parent as? ViewGroup)?.removeView(wv)
+                    wv.removeAllViews()
                     wv.onPause()
                     wv.postDelayed({
                         try {
@@ -77,7 +82,7 @@ fun WebPlayerView(
                         } catch (e: Exception) {
                             Log.w("WebPlayerView", "Error destroying WebView: ${e.message}")
                         }
-                    }, 200)
+                    }, 150)
                 }
             } catch (e: Exception) {
                 Log.w("WebPlayerView", "Error disposing WebView: ${e.message}")
@@ -86,192 +91,215 @@ fun WebPlayerView(
         }
     }
 
+    fun loadTargetIntoWebView(webView: WebView, rawUrl: String) {
+        var cleanUrl = rawUrl.trim()
+        if (cleanUrl.startsWith("//")) cleanUrl = "https:$cleanUrl"
+        if (cleanUrl.isEmpty()) return
+
+        webView.tag = cleanUrl
+        isLoading = true
+
+        if (cleanUrl.contains(".m3u8", ignoreCase = true)) {
+            val headersJson = JSONObject(headers as Map<*, *>).toString()
+            val quotedUrl = JSONObject.quote(cleanUrl)
+            val hlsHtml = """
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                    <style>
+                        html, body { margin:0; padding:0; width:100%; height:100%; background:#000; overflow:hidden; display:flex; justify-content:center; align-items:center; }
+                        video { width:100%; height:100%; object-fit:contain; }
+                    </style>
+                    <script src="file:///android_asset/hls.min.js"></script>
+                    <script>
+                        if (typeof Hls === 'undefined') {
+                            var cdnScript = document.createElement('script');
+                            cdnScript.src = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js';
+                            document.head.appendChild(cdnScript);
+                        }
+                    </script>
+                </head>
+                <body>
+                    <video id="video" controls autoplay playsinline></video>
+                    <script>
+                        function initHls() {
+                            var video = document.getElementById('video');
+                            var videoSrc = $quotedUrl;
+                            var customHeaders = $headersJson;
+                            if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+                                if (window.__vibestreamHls) { try { window.__vibestreamHls.destroy(); } catch(e){} }
+                                var hls = new Hls({
+                                    xhrSetup: function(xhr, url) {
+                                        xhr.withCredentials = false;
+                                        for (var k in customHeaders) {
+                                            if (customHeaders.hasOwnProperty(k)) {
+                                                var lk = k.toLowerCase();
+                                                if (lk !== 'referer' && lk !== 'user-agent' && lk !== 'origin' && lk !== 'host') {
+                                                    try { xhr.setRequestHeader(k, customHeaders[k]); } catch(e){}
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                                window.__vibestreamHls = hls;
+                                hls.loadSource(videoSrc);
+                                hls.attachMedia(video);
+                                hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                                    video.play().catch(function(){});
+                                });
+                            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                                video.src = videoSrc;
+                                video.addEventListener('loadedmetadata', function() {
+                                    video.play().catch(function(){});
+                                });
+                            }
+                        }
+                        if (typeof Hls !== 'undefined') {
+                            initHls();
+                        } else {
+                            window.addEventListener('load', function() { setTimeout(initHls, 300); });
+                        }
+                    </script>
+                </body>
+                </html>
+            """.trimIndent()
+
+            val effectiveBaseUrl = when {
+                !baseUrl.isNullOrBlank() && (baseUrl.startsWith("http://") || baseUrl.startsWith("https://")) -> baseUrl
+                headers["Referer"]?.startsWith("http") == true -> headers["Referer"]!!
+                headers["Origin"]?.startsWith("http") == true -> headers["Origin"]!!
+                cleanUrl.startsWith("http") -> {
+                    try {
+                        val uri = Uri.parse(cleanUrl)
+                        if (uri.scheme != null && uri.host != null) "${uri.scheme}://${uri.host}" else cleanUrl
+                    } catch (_: Exception) {
+                        cleanUrl
+                    }
+                }
+                else -> "https://anichin.co"
+            }
+            webView.loadDataWithBaseURL(effectiveBaseUrl, hlsHtml, "text/html", "UTF-8", null)
+        } else {
+            if (headers.isNotEmpty()) {
+                webView.loadUrl(cleanUrl, headers)
+            } else {
+                webView.loadUrl(cleanUrl)
+            }
+        }
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        AndroidView(
-            factory = { ctx ->
-                WebView(ctx).apply {
-                    setLayerType(View.LAYER_TYPE_SOFTWARE, null)
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                    setBackgroundColor(AndroidColor.BLACK)
-                    settings.apply {
-                        javaScriptEnabled = true
-                        domStorageEnabled = true
-                        mediaPlaybackRequiresUserGesture = false
-                        allowFileAccess = true
-                        allowContentAccess = true
-                        loadWithOverviewMode = true
-                        useWideViewPort = true
-                        setSupportZoom(false)
-                        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                        userAgentString = headers["User-Agent"]
-                            ?: "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
-                    }
+        key(url, renderEpoch) {
+            AndroidView(
+                factory = { ctx ->
+                    WebView(ctx).apply {
+                        setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                        setBackgroundColor(AndroidColor.BLACK)
+                        settings.apply {
+                            javaScriptEnabled = true
+                            domStorageEnabled = true
+                            mediaPlaybackRequiresUserGesture = false
+                            allowFileAccess = false
+                            allowContentAccess = false
+                            loadWithOverviewMode = true
+                            useWideViewPort = true
+                            setSupportZoom(false)
+                            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                            userAgentString = headers["User-Agent"]
+                                ?: "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+                        }
 
-                    webChromeClient = object : WebChromeClient() {
-                        override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                            loadProgress = newProgress
-                            if (newProgress >= 85) {
-                                isLoading = false
+                        webChromeClient = object : WebChromeClient() {
+                            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                                loadProgress = newProgress
+                                if (newProgress >= 85) {
+                                    isLoading = false
+                                }
                             }
                         }
-                    }
 
-                    webViewClient = object : WebViewClient() {
-                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                            val targetUrl = request?.url?.toString() ?: ""
-                            val lower = targetUrl.lowercase()
-                            // Blok navigasi intent aplikasi eksternal atau skema non-http
-                            if (lower.startsWith("intent://") || lower.startsWith("market://") ||
-                                lower.startsWith("whatsapp://") || lower.startsWith("tg://") ||
-                                lower.startsWith("about:blank")
-                            ) {
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                                val targetUrl = request?.url?.toString() ?: ""
+                                val lower = targetUrl.lowercase()
+                                if (lower.startsWith("intent://") || lower.startsWith("market://") ||
+                                    lower.startsWith("whatsapp://") || lower.startsWith("tg://") ||
+                                    lower.startsWith("javascript:") || lower.startsWith("about:blank")
+                                ) {
+                                    return true
+                                }
+                                return false
+                            }
+
+                            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                                Log.w("WebPlayerView", "Render process gone (didCrash=${detail?.didCrash()})")
+                                isLoading = false
+                                webViewInstance = null
+                                runCatching {
+                                    view?.stopLoading()
+                                    (view?.parent as? ViewGroup)?.removeView(view)
+                                    view?.destroy()
+                                }
+                                if (renderEpoch == 0) {
+                                    renderEpoch = 1
+                                } else {
+                                    rendererCrashed = true
+                                }
                                 return true
                             }
-                            return false
+
+                            override fun onPageFinished(view: WebView?, pageUrl: String?) {
+                                super.onPageFinished(view, pageUrl)
+                                isLoading = false
+                                rendererCrashed = false
+
+                                val injectScript = """
+                                    (function() {
+                                        try {
+                                            var style = document.createElement('style');
+                                            style.innerHTML = 'body, html { margin:0; padding:0; background:#000!important; overflow:hidden!important; width:100%!important; height:100%!important; } video, iframe, #player, .player, .jwplayer, .video-js { position:absolute!important; top:0!important; left:0!important; width:100%!important; height:100%!important; object-fit:contain!important; } .header, .footer, .sidebar, .comments, #disqus_thread, [class*="ad"], [id*="ad"], [class*="banner"] { display:none!important; }';
+                                            document.head.appendChild(style);
+
+                                            setTimeout(function() {
+                                                var v = document.querySelector('video');
+                                                if (v) { v.play().catch(function(){}); }
+                                                var btns = document.querySelectorAll('.jw-display-icon-container, .vjs-big-play-button, .play-button, [aria-label="Play"], #play');
+                                                btns.forEach(function(b) { b.click(); });
+                                            }, 600);
+                                        } catch(e){}
+                                    })();
+                                """.trimIndent()
+                                view?.evaluateJavascript(injectScript, null)
+                            }
                         }
 
-                        override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
-                            Log.w("WebPlayerView", "Render process gone (didCrash=${detail?.didCrash()})")
-                            isLoading = false
-                            webViewInstance = null
-                            return true
-                        }
-
-                        override fun onPageFinished(view: WebView?, pageUrl: String?) {
-                            super.onPageFinished(view, pageUrl)
-                            isLoading = false
-
-                            // Injeksi CSS agar video mengisi layar penuh dan sembunyikan overlay iklan umum
-                            val injectScript = """
-                                (function() {
-                                    try {
-                                        var style = document.createElement('style');
-                                        style.innerHTML = 'body, html { margin:0; padding:0; background:#000!important; overflow:hidden!important; width:100%!important; height:100%!important; } video, iframe, #player, .player, .jwplayer, .video-js { position:absolute!important; top:0!important; left:0!important; width:100%!important; height:100%!important; object-fit:contain!important; } .header, .footer, .sidebar, .comments, #disqus_thread, [class*="ad"], [id*="ad"], [class*="banner"] { display:none!important; }';
-                                        document.head.appendChild(style);
-
-                                        setTimeout(function() {
-                                            var v = document.querySelector('video');
-                                            if (v) { v.play().catch(function(){}); }
-                                            var btns = document.querySelectorAll('.jw-display-icon-container, .vjs-big-play-button, .play-button, [aria-label="Play"], #play');
-                                            btns.forEach(function(b) { b.click(); });
-                                        }, 600);
-                                    } catch(e){}
-                                })();
-                            """.trimIndent()
-                            view?.evaluateJavascript(injectScript, null)
-                        }
+                        loadTargetIntoWebView(this, url)
+                        webViewInstance = this
                     }
-
+                },
+                update = { webView ->
                     var cleanUrl = url.trim()
                     if (cleanUrl.startsWith("//")) cleanUrl = "https:$cleanUrl"
-
-                    // Jika URL berupa stream m3u8 langsung, jalankan dengan HTML5 Player + HLS.js
-                    if (cleanUrl.contains(".m3u8", ignoreCase = true)) {
-                        val headersJson = org.json.JSONObject(headers as Map<*, *>).toString()
-                        val hlsHtml = """
-                            <!DOCTYPE html>
-                            <html>
-                            <head>
-                                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-                                <style>
-                                    html, body { margin:0; padding:0; width:100%; height:100%; background:#000; overflow:hidden; display:flex; justify-content:center; align-items:center; }
-                                    video { width:100%; height:100%; object-fit:contain; }
-                                </style>
-                                <script src="file:///android_asset/hls.min.js"></script>
-                                <script>
-                                    if (typeof Hls === 'undefined') {
-                                        var cdnScript = document.createElement('script');
-                                        cdnScript.src = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js';
-                                        document.head.appendChild(cdnScript);
-                                    }
-                                </script>
-                            </head>
-                            <body>
-                                <video id="video" controls autoplay playsinline></video>
-                                <script>
-                                    function initHls() {
-                                        var video = document.getElementById('video');
-                                        var videoSrc = '$cleanUrl';
-                                        var customHeaders = $headersJson;
-                                        if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-                                            var hls = new Hls({
-                                                xhrSetup: function(xhr, url) {
-                                                    xhr.withCredentials = false;
-                                                    for (var k in customHeaders) {
-                                                        if (customHeaders.hasOwnProperty(k)) {
-                                                            var lk = k.toLowerCase();
-                                                            if (lk !== 'referer' && lk !== 'user-agent' && lk !== 'origin' && lk !== 'host') {
-                                                                try { xhr.setRequestHeader(k, customHeaders[k]); } catch(e){}
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                            hls.loadSource(videoSrc);
-                                            hls.attachMedia(video);
-                                            hls.on(Hls.Events.MANIFEST_PARSED, function() {
-                                                video.play().catch(function(){});
-                                            });
-                                        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                                            video.src = videoSrc;
-                                            video.addEventListener('loadedmetadata', function() {
-                                                video.play().catch(function(){});
-                                            });
-                                        }
-                                    }
-                                    if (typeof Hls !== 'undefined') {
-                                        initHls();
-                                    } else {
-                                        window.addEventListener('load', function() { setTimeout(initHls, 300); });
-                                    }
-                                </script>
-                            </body>
-                            </html>
-                        """.trimIndent()
-
-                        val effectiveBaseUrl = when {
-                            !baseUrl.isNullOrBlank() && (baseUrl.startsWith("http://") || baseUrl.startsWith("https://")) -> baseUrl
-                            headers["Referer"] != null && headers["Referer"]!!.startsWith("http") -> headers["Referer"]!!
-                            headers["Origin"] != null && headers["Origin"]!!.startsWith("http") -> headers["Origin"]!!
-                            cleanUrl.startsWith("http") -> {
-                                try {
-                                    val uri = Uri.parse(cleanUrl)
-                                    if (uri.scheme != null && uri.host != null) "${uri.scheme}://${uri.host}" else cleanUrl
-                                } catch (e: Exception) { cleanUrl }
-                            }
-                            else -> "https://anichin.vip"
-                        }
-                        loadDataWithBaseURL(effectiveBaseUrl, hlsHtml, "text/html", "UTF-8", null)
-                    } else {
-                        if (headers.isNotEmpty()) {
-                            loadUrl(cleanUrl, headers)
-                        } else {
-                            loadUrl(cleanUrl)
-                        }
+                    val lastLoaded = webView.tag as? String
+                    if (cleanUrl.isNotEmpty() && lastLoaded != cleanUrl) {
+                        loadTargetIntoWebView(webView, cleanUrl)
                     }
-
-                    webViewInstance = this
-                }
-            },
-            update = { webView ->
-                var cleanUrl = url.trim()
-                if (cleanUrl.startsWith("//")) cleanUrl = "https:$cleanUrl"
-                if (webView.url != cleanUrl && cleanUrl.isNotEmpty() && !cleanUrl.contains(".m3u8")) {
-                    webView.loadUrl(cleanUrl)
-                }
-            },
-            modifier = Modifier.fillMaxSize()
-        )
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
 
         // Web Player Top Control Overlay
-        Column(
+        Row(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
@@ -280,133 +308,171 @@ fun WebPlayerView(
                         colors = listOf(Color.Black.copy(alpha = 0.85f), Color.Transparent)
                     )
                 )
-                .padding(
-                    horizontal = if (isFullscreen) 12.dp else 8.dp,
-                    vertical = if (isFullscreen) 8.dp else 4.dp
-                )
+                .padding(horizontal = if (isFullscreen) 14.dp else 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (isFullscreen) {
-                        IconButton(
-                            onClick = onBack,
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (isFullscreen) {
+                    IconButton(
+                        onClick = onBack,
+                        modifier = Modifier
+                            .size(48.dp)
+                    ) {
+                        Box(
                             modifier = Modifier
-                                .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                                .size(28.dp)
+                                .size(32.dp)
+                                .background(Color.Black.copy(alpha = 0.55f), CircleShape),
+                            contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 Icons.AutoMirrored.Filled.ArrowBack,
                                 contentDescription = "Kembali",
                                 tint = Color.White,
-                                modifier = Modifier.size(15.dp)
+                                modifier = Modifier.size(16.dp)
                             )
                         }
-                        Spacer(modifier = Modifier.width(6.dp))
                     }
-                    Box(
-                        modifier = Modifier
-                            .background(Color(0xFF00F2FE).copy(alpha = 0.2f), RoundedCornerShape(4.dp))
-                            .border(0.5.dp, Color(0xFF00F2FE).copy(alpha = 0.5f), RoundedCornerShape(4.dp))
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                }
+                Box(
+                    modifier = Modifier
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f), RoundedCornerShape(6.dp))
+                        .border(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                ) {
+                    Text(
+                        text = if (isFullscreen) "WEB SANDBOX" else "WEB",
+                        color = MaterialTheme.colorScheme.secondary,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.primary)
+                        .clickable { onSwitchToExo() }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Filled.FlashOn,
+                            contentDescription = "Beralih ke ExoPlayer",
+                            tint = Color.White,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text("ExoPlayer", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                IconButton(
+                    onClick = {
+                        if (rendererCrashed) {
+                            rendererCrashed = false
+                            renderEpoch++
+                        } else {
+                            webViewInstance?.reload()
+                        }
+                    },
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Refresh,
+                        contentDescription = "Muat Ulang",
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                if (isFullscreen) {
+                    IconButton(
+                        onClick = onOpenServerSelector,
+                        modifier = Modifier.size(48.dp)
                     ) {
-                        Text(
-                            text = if (isFullscreen) "WEB ENGINE" else "WEB",
-                            color = Color(0xFF00F2FE),
-                            fontSize = 8.sp,
-                            fontWeight = FontWeight.Bold
+                        Icon(
+                            Icons.Filled.Dns,
+                            contentDescription = "Pilih Server",
+                            tint = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 }
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                IconButton(
+                    onClick = onToggleFullscreen,
+                    modifier = Modifier.size(48.dp)
                 ) {
-                    // Tombol Switch balik ke Native ExoPlayer
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(Color(0xFF7000FF))
-                            .clickable { onSwitchToExo() }
-                            .padding(horizontal = 6.dp, vertical = 3.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Filled.FlashOn,
-                                contentDescription = "Exo",
-                                tint = Color.White,
-                                modifier = Modifier.size(11.dp)
-                            )
-                            Spacer(modifier = Modifier.width(2.dp))
-                            Text("Exo", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-
-                    // Tombol Muat Ulang
-                    IconButton(
-                        onClick = { webViewInstance?.reload() },
-                        modifier = Modifier
-                            .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                            .size(if (isFullscreen) 28.dp else 22.dp)
-                    ) {
-                        Icon(
-                            Icons.Filled.Refresh,
-                            contentDescription = "Muat Ulang",
-                            tint = Color.White,
-                            modifier = Modifier.size(if (isFullscreen) 15.dp else 12.dp)
-                        )
-                    }
-
-                    if (isFullscreen) {
-                        // Tombol Pilih Server
-                        IconButton(
-                            onClick = onOpenServerSelector,
-                            modifier = Modifier
-                                .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                                .size(28.dp)
-                        ) {
-                            Icon(
-                                Icons.Filled.Dns,
-                                contentDescription = "Server",
-                                tint = Color(0xFFFFC107),
-                                modifier = Modifier.size(15.dp)
-                            )
-                        }
-                    }
-
-                    // Tombol Toggle Layar Penuh
-                    IconButton(
-                        onClick = onToggleFullscreen,
-                        modifier = Modifier
-                            .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                            .size(if (isFullscreen) 28.dp else 22.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (isFullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
-                            contentDescription = "Layar Penuh",
-                            tint = Color.White,
-                            modifier = Modifier.size(if (isFullscreen) 15.dp else 13.dp)
-                        )
-                    }
+                    Icon(
+                        imageVector = if (isFullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                        contentDescription = "Layar Penuh",
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
             }
         }
 
-        // Loading Progress Indicator
-        if (isLoading) {
+        if (rendererCrashed) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.4f)),
+                    .background(Color.Black.copy(alpha = 0.86f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.padding(24.dp)
+                ) {
+                    Text(
+                        text = "Pemutar web terhenti sementara",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(MaterialTheme.colorScheme.primary)
+                                .clickable {
+                                    rendererCrashed = false
+                                    renderEpoch++
+                                }
+                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                        ) {
+                            Text("Muat Ulang Web", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(MaterialTheme.colorScheme.surface)
+                                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+                                .clickable { onSwitchToExo() }
+                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                        ) {
+                            Text("Ganti ke ExoPlayer", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+            }
+        } else if (isLoading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.45f)),
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(
-                        color = Color(0xFF00F2FE),
+                        color = MaterialTheme.colorScheme.primary,
                         strokeWidth = 3.dp,
                         modifier = Modifier.size(38.dp)
                     )

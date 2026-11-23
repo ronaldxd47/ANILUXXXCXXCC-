@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.View
+import android.view.ViewGroup
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -17,9 +18,14 @@ import com.example.data.stream.model.StreamCandidate
 import com.example.data.stream.model.StreamProtocol
 import com.example.data.stream.ranking.CandidateRanker
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Headless WebView Extractor untuk mengekstraksi URL video dinamis (HLS, DASH, MP4)
@@ -30,6 +36,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 object HeadlessStreamExtractor {
     private const val TAG = "HeadlessStreamExtractor"
     private const val DEFAULT_TIMEOUT_MS = 8500L
+    private val extractorMutex = Mutex()
 
     /**
      * Mengekstrak satu ResolvedStream terbaik (backward compatible).
@@ -38,10 +45,10 @@ object HeadlessStreamExtractor {
         context: Context,
         pageUrl: String,
         timeoutMs: Long = DEFAULT_TIMEOUT_MS
-    ): ResolvedStream? = withContext(Dispatchers.Main) {
+    ): ResolvedStream? {
         val candidates = extractCandidateStreams(context, pageUrl, timeoutMs)
-        val best = candidates.firstOrNull() ?: return@withContext null
-        return@withContext best.toResolvedStream()
+        val best = candidates.firstOrNull() ?: return null
+        return best.toResolvedStream()
     }
 
     /**
@@ -52,17 +59,18 @@ object HeadlessStreamExtractor {
         context: Context,
         pageUrl: String,
         timeoutMs: Long = DEFAULT_TIMEOUT_MS
-    ): List<StreamCandidate> = withContext(Dispatchers.Main) {
-        withTimeoutOrNull(timeoutMs) {
-            suspendCancellableCoroutine { continuation ->
-                var webView: WebView? = null
-                var isDone = false
-                val handler = Handler(Looper.getMainLooper())
-                val collectedCandidates = mutableListOf<StreamCandidate>()
+    ): List<StreamCandidate> = extractorMutex.withLock {
+        currentCoroutineContext().ensureActive()
+        withContext(Dispatchers.Main) {
+            withTimeoutOrNull(timeoutMs) {
+                suspendCancellableCoroutine { continuation ->
+                    var webView: WebView? = null
+                    val isDone = AtomicBoolean(false)
+                    val handler = Handler(Looper.getMainLooper())
+                    val collectedCandidates = mutableListOf<StreamCandidate>()
 
-                val cleanup = {
-                    if (!isDone) {
-                        isDone = true
+                    fun performCleanup(destroyImmediately: Boolean = false) {
+                        if (!isDone.compareAndSet(false, true)) return
                         handler.removeCallbacksAndMessages(null)
                         val wv = webView
                         webView = null
@@ -71,180 +79,206 @@ object HeadlessStreamExtractor {
                                 wv.stopLoading()
                                 wv.webChromeClient = null
                                 wv.webViewClient = object : WebViewClient() {}
+                                (wv.parent as? ViewGroup)?.removeView(wv)
+                                wv.removeAllViews()
                                 wv.onPause()
-                            } catch (e: Exception) {
-                                Log.w(TAG, "WebView pause error: ${e.message}")
-                            }
-                            handler.postDelayed({
-                                try {
+                                if (destroyImmediately) {
                                     wv.destroy()
-                                } catch (e: Exception) {}
-                            }, 300)
-                        }
-                    }
-                }
-
-                handler.postDelayed({
-                    if (continuation.isActive && !isDone) {
-                        val ranked = CandidateRanker.rankCandidates(collectedCandidates)
-                        cleanup()
-                        continuation.resumeWith(Result.success(ranked))
-                    }
-                }, timeoutMs - 500)
-
-                try {
-                    webView = WebView(context).apply {
-                        setLayerType(View.LAYER_TYPE_SOFTWARE, null)
-                        settings.apply {
-                            javaScriptEnabled = true
-                            domStorageEnabled = true
-                            databaseEnabled = false
-                            allowFileAccess = false
-                            allowContentAccess = false
-                            blockNetworkImage = true
-                            mediaPlaybackRequiresUserGesture = true
-                            userAgentString =
-                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                        }
-
-                        webViewClient = object : WebViewClient() {
-                            override fun onRenderProcessGone(
-                                view: WebView?,
-                                detail: RenderProcessGoneDetail?
-                            ): Boolean {
-                                Log.w(TAG, "Headless WebView render process gone: didCrash=${detail?.didCrash()}")
-                                if (continuation.isActive && !isDone) {
-                                    val ranked = CandidateRanker.rankCandidates(collectedCandidates)
-                                    cleanup()
-                                    continuation.resumeWith(Result.success(ranked))
+                                } else {
+                                    wv.loadUrl("about:blank")
+                                    handler.postDelayed({
+                                        runCatching { wv.destroy() }
+                                    }, 150)
                                 }
-                                return true
+                            } catch (e: Exception) {
+                                Log.w(TAG, "WebView cleanup error: ${e.message}")
+                            }
+                        }
+                    }
+
+                    fun scheduleCleanup(destroyImmediately: Boolean = false) {
+                        if (Looper.myLooper() == Looper.getMainLooper()) {
+                            performCleanup(destroyImmediately)
+                        } else {
+                            handler.post { performCleanup(destroyImmediately) }
+                        }
+                    }
+
+                    handler.postDelayed({
+                        if (continuation.isActive && !isDone.get()) {
+                            val ranked = synchronized(collectedCandidates) {
+                                CandidateRanker.rankCandidates(collectedCandidates.toList())
+                            }
+                            performCleanup(destroyImmediately = false)
+                            continuation.resumeWith(Result.success(ranked))
+                        }
+                    }, (timeoutMs - 500L).coerceAtLeast(1500L))
+
+                    try {
+                        webView = WebView(context.applicationContext).apply {
+                            setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+                            settings.apply {
+                                javaScriptEnabled = true
+                                domStorageEnabled = true
+                                allowFileAccess = false
+                                allowContentAccess = false
+                                blockNetworkImage = true
+                                mediaPlaybackRequiresUserGesture = true
+                                userAgentString =
+                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                             }
 
-                            override fun onPageFinished(view: WebView?, url: String?) {
-                                super.onPageFinished(view, url)
-                                if (isDone) return
-                                
-                                val autoPlayJs = """
-                                    (function() {
-                                        try {
-                                            var playBtns = document.querySelectorAll('.jw-video, .jw-button-color, .plyr__control--overlaid, .vjs-big-play-button, .play-button, [aria-label="Play"], #player, iframe, .video-js');
-                                            playBtns.forEach(function(btn) { btn.click(); });
-                                            var v = document.querySelector('video');
-                                            if (v) {
-                                                v.muted = true;
-                                                return v.src || (v.querySelector('source') ? v.querySelector('source').src : '');
-                                            }
-                                        } catch(e){}
-                                        return '';
-                                    })();
-                                """.trimIndent()
-                                view?.evaluateJavascript(autoPlayJs) { rawSrc ->
-                                    val directSrc = rawSrc?.replace("\"", "")?.trim() ?: ""
-                                    if (directSrc.isNotEmpty() && isMediaStreamUrl(directSrc)) {
-                                        val protocol = ProtocolDetector.detect(directSrc, "", "")
-                                        val reqPolicy = RequestPolicy(
-                                            referer = pageUrl,
-                                            origin = getOrigin(pageUrl),
-                                            userAgent = settings.userAgentString
-                                        )
-                                        val candidate = StreamCandidate(
-                                            url = directSrc,
-                                            protocol = protocol,
-                                            container = if (protocol == StreamProtocol.HLS) ContainerFormat.MPEG_TS else ContainerFormat.MP4,
-                                            requestPolicy = reqPolicy,
-                                            isDirectVideo = true,
-                                            originalPageUrl = pageUrl
-                                        )
-                                        collectedCandidates.add(candidate)
+                            webViewClient = object : WebViewClient() {
+                                override fun onRenderProcessGone(
+                                    view: WebView?,
+                                    detail: RenderProcessGoneDetail?
+                                ): Boolean {
+                                    Log.w(TAG, "Headless WebView render process gone: didCrash=${detail?.didCrash()}")
+                                    val ranked = synchronized(collectedCandidates) {
+                                        CandidateRanker.rankCandidates(collectedCandidates.toList())
+                                    }
+                                    performCleanup(destroyImmediately = true)
+                                    if (continuation.isActive) {
+                                        continuation.resumeWith(Result.success(ranked))
+                                    }
+                                    return true
+                                }
 
-                                        // Jika master HLS ditemukan dari video DOM, langsung selesaikan
-                                        if (protocol == StreamProtocol.HLS && continuation.isActive && !isDone) {
-                                            val ranked = CandidateRanker.rankCandidates(collectedCandidates)
-                                            handler.post {
-                                                if (continuation.isActive && !isDone) {
-                                                    cleanup()
-                                                    continuation.resumeWith(Result.success(ranked))
+                                override fun onPageFinished(view: WebView?, url: String?) {
+                                    super.onPageFinished(view, url)
+                                    if (isDone.get()) return
+
+                                    val autoPlayJs = """
+                                        (function() {
+                                            try {
+                                                var playBtns = document.querySelectorAll('.jw-video, .jw-button-color, .plyr__control--overlaid, .vjs-big-play-button, .play-button, [aria-label="Play"], #player, iframe, .video-js');
+                                                playBtns.forEach(function(btn) { btn.click(); });
+                                                var v = document.querySelector('video');
+                                                if (v) {
+                                                    v.muted = true;
+                                                    return v.src || (v.querySelector('source') ? v.querySelector('source').src : '');
+                                                }
+                                            } catch(e){}
+                                            return '';
+                                        })();
+                                    """.trimIndent()
+                                    view?.evaluateJavascript(autoPlayJs) { rawSrc ->
+                                        if (isDone.get()) return@evaluateJavascript
+                                        val directSrc = rawSrc?.replace("\"", "")?.trim() ?: ""
+                                        if (directSrc.isNotEmpty() && isMediaStreamUrl(directSrc)) {
+                                            val protocol = ProtocolDetector.detect(directSrc, "", "")
+                                            val reqPolicy = RequestPolicy(
+                                                referer = pageUrl,
+                                                origin = getOrigin(pageUrl),
+                                                userAgent = settings.userAgentString
+                                            )
+                                            val candidate = StreamCandidate(
+                                                url = directSrc,
+                                                protocol = protocol,
+                                                container = if (protocol == StreamProtocol.HLS) ContainerFormat.MPEG_TS else ContainerFormat.MP4,
+                                                requestPolicy = reqPolicy,
+                                                isDirectVideo = true,
+                                                originalPageUrl = pageUrl
+                                            )
+                                            synchronized(collectedCandidates) {
+                                                collectedCandidates.add(candidate)
+                                            }
+
+                                            if (protocol == StreamProtocol.HLS && continuation.isActive && !isDone.get()) {
+                                                val ranked = synchronized(collectedCandidates) {
+                                                    CandidateRanker.rankCandidates(collectedCandidates.toList())
+                                                }
+                                                handler.post {
+                                                    if (continuation.isActive && !isDone.get()) {
+                                                        performCleanup(destroyImmediately = false)
+                                                        continuation.resumeWith(Result.success(ranked))
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
-                            }
 
-                            override fun shouldInterceptRequest(
-                                view: WebView?,
-                                request: WebResourceRequest?
-                            ): WebResourceResponse? {
-                                val reqUrl = request?.url?.toString() ?: ""
-                                val headers = request?.requestHeaders ?: emptyMap()
+                                override fun shouldInterceptRequest(
+                                    view: WebView?,
+                                    request: WebResourceRequest?
+                                ): WebResourceResponse? {
+                                    if (isDone.get()) return super.shouldInterceptRequest(view, request)
+                                    val reqUrl = request?.url?.toString() ?: ""
+                                    val headers = request?.requestHeaders ?: emptyMap()
 
-                                if (isMediaStreamUrl(reqUrl)) {
-                                    val protocol = ProtocolDetector.detect(reqUrl, "", "")
+                                    if (isMediaStreamUrl(reqUrl)) {
+                                        val protocol = ProtocolDetector.detect(reqUrl, "", "")
 
-                                    val cookieManager = android.webkit.CookieManager.getInstance()
-                                    val sysCookies = cookieManager.getCookie(reqUrl) ?: cookieManager.getCookie(pageUrl) ?: ""
-                                    val effectiveCookies = headers["Cookie"] ?: sysCookies
+                                        val cookieManager = android.webkit.CookieManager.getInstance()
+                                        val sysCookies = cookieManager.getCookie(reqUrl) ?: cookieManager.getCookie(pageUrl) ?: ""
+                                        val effectiveCookies = headers["Cookie"] ?: sysCookies
 
-                                    val resolvedHeaders = HashMap<String, String>().apply {
-                                        put("Referer", headers["Referer"] ?: pageUrl)
-                                        put("Origin", headers["Origin"] ?: getOrigin(pageUrl))
-                                        put("User-Agent", headers["User-Agent"] ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-                                        if (effectiveCookies.isNotBlank()) {
-                                            put("Cookie", effectiveCookies)
+                                        val resolvedHeaders = HashMap<String, String>().apply {
+                                            put("Referer", headers["Referer"] ?: pageUrl)
+                                            put("Origin", headers["Origin"] ?: getOrigin(pageUrl))
+                                            put("User-Agent", headers["User-Agent"] ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                                            if (effectiveCookies.isNotBlank()) {
+                                                put("Cookie", effectiveCookies)
+                                            }
+                                            put("Accept", "*/*")
                                         }
-                                        put("Accept", "*/*")
-                                    }
 
-                                    val candidate = StreamCandidate(
-                                        url = reqUrl,
-                                        protocol = protocol,
-                                        container = if (protocol == StreamProtocol.HLS) ContainerFormat.MPEG_TS else ContainerFormat.MP4,
-                                        requestPolicy = RequestPolicy(
-                                            manifestHeaders = resolvedHeaders,
-                                            segmentHeaders = resolvedHeaders,
-                                            referer = resolvedHeaders["Referer"],
-                                            origin = resolvedHeaders["Origin"],
-                                            cookie = effectiveCookies.takeIf { it.isNotBlank() },
-                                            userAgent = resolvedHeaders["User-Agent"]
-                                        ),
-                                        isDirectVideo = true,
-                                        originalPageUrl = pageUrl
-                                    )
-                                    collectedCandidates.add(candidate)
+                                        val candidate = StreamCandidate(
+                                            url = reqUrl,
+                                            protocol = protocol,
+                                            container = if (protocol == StreamProtocol.HLS) ContainerFormat.MPEG_TS else ContainerFormat.MP4,
+                                            requestPolicy = RequestPolicy(
+                                                manifestHeaders = resolvedHeaders,
+                                                segmentHeaders = resolvedHeaders,
+                                                referer = resolvedHeaders["Referer"],
+                                                origin = resolvedHeaders["Origin"],
+                                                cookie = effectiveCookies.takeIf { it.isNotBlank() },
+                                                userAgent = resolvedHeaders["User-Agent"]
+                                            ),
+                                            isDirectVideo = true,
+                                            originalPageUrl = pageUrl
+                                        )
+                                        synchronized(collectedCandidates) {
+                                            collectedCandidates.add(candidate)
+                                        }
 
-                                    // Jika kita mendeteksi manifest HLS master (.m3u8), langsung selesaikan tanpa menunggu timeout
-                                    if (reqUrl.contains(".m3u8", ignoreCase = true) && continuation.isActive && !isDone) {
-                                        handler.post {
-                                            if (continuation.isActive && !isDone) {
-                                                val ranked = CandidateRanker.rankCandidates(collectedCandidates)
-                                                cleanup()
-                                                continuation.resumeWith(Result.success(ranked))
+                                        if (reqUrl.contains(".m3u8", ignoreCase = true) && continuation.isActive && !isDone.get()) {
+                                            handler.post {
+                                                if (continuation.isActive && !isDone.get()) {
+                                                    val ranked = synchronized(collectedCandidates) {
+                                                        CandidateRanker.rankCandidates(collectedCandidates.toList())
+                                                    }
+                                                    performCleanup(destroyImmediately = false)
+                                                    continuation.resumeWith(Result.success(ranked))
+                                                }
                                             }
                                         }
                                     }
+                                    return super.shouldInterceptRequest(view, request)
                                 }
-                                return super.shouldInterceptRequest(view, request)
                             }
+
+                            var cleanUrl = pageUrl.trim()
+                            if (cleanUrl.startsWith("//")) cleanUrl = "https:$cleanUrl"
+                            loadUrl(cleanUrl)
                         }
-
-                        var cleanUrl = pageUrl.trim()
-                        if (cleanUrl.startsWith("//")) cleanUrl = "https:$cleanUrl"
-                        loadUrl(cleanUrl)
+                    } catch (e: Exception) {
+                        val ranked = synchronized(collectedCandidates) {
+                            CandidateRanker.rankCandidates(collectedCandidates.toList())
+                        }
+                        performCleanup(destroyImmediately = true)
+                        if (continuation.isActive) {
+                            continuation.resumeWith(Result.success(ranked))
+                        }
                     }
-                } catch (e: Exception) {
-                    if (continuation.isActive && !isDone) {
-                        val ranked = CandidateRanker.rankCandidates(collectedCandidates)
-                        cleanup()
-                        continuation.resumeWith(Result.success(ranked))
+
+                    continuation.invokeOnCancellation {
+                        scheduleCleanup(destroyImmediately = false)
                     }
                 }
-
-                continuation.invokeOnCancellation {
-                    cleanup()
-                }
-            }
-        } ?: emptyList()
+            } ?: emptyList()
+        }
     }
 
     private fun isMediaStreamUrl(url: String): Boolean {

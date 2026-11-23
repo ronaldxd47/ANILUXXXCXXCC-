@@ -1,7 +1,8 @@
+# IDE & Gradle
 *.iml
 .gradle
+**/.gradle/
 .kotlin
-/local.properties
 /.idea/caches
 /.idea/libraries
 /.idea/modules.xml
@@ -9,10 +10,38 @@
 /.idea/navEditor.xml
 /.idea/assetWizardSettings.xml
 .DS_Store
+
+# Build outputs & binaries
 /build
+**/build/
 /captures
 .externalNativeBuild
 .cxx
+*.apk
+*.aab
+*.ap_
+*.dex
+*.log
+*.hprof
+
+# Secrets, local env, & keystores (NEVER commit)
 local.properties
+/local.properties
 .env
-debug.keystore
+.env.*
+!.env.example
+app/.env
+app/.env.*
+secrets.properties
+keystore.properties
+*.jks
+*.keystore
+*.p12
+!debug.keystore.base64
+google-services.json
+app/google-services.json
+firebase_applet_config.xml
+
+# Temporary test outputs
+pipeline_verification.txt
+test_output.txt

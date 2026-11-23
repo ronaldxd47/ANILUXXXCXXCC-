@@ -13,39 +13,44 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 
 /**
  * Dialog Pengaturan Player untuk memilih Kecepatan Pemutaran (Playback Speed)
- * dan Kualitas Video (HLS Track Selection).
+ * dan Kualitas Video dinamis dari track HLS/DASH yang terdeteksi.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun PlayerSettingsDialog(
     playbackSpeed: Float,
     currentQuality: String,
+    availableQualities: List<String> = listOf("Auto", "1080p", "720p", "480p", "360p"),
     onSpeedSelected: (Float) -> Unit,
     onQualitySelected: (String) -> Unit,
     onDismissRequest: () -> Unit
 ) {
+    val speedOptions = listOf(0.5f, 1.0f, 1.25f, 1.5f, 2.0f)
+    val qualityList = availableQualities.ifEmpty { listOf("Auto", "1080p", "720p", "480p", "360p") }
+
     AlertDialog(
         onDismissRequest = onDismissRequest,
-        containerColor = Color(0xFF161822),
-        titleContentColor = Color.White,
-        textContentColor = Color.White,
+        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        titleContentColor = MaterialTheme.colorScheme.onSurface,
+        textContentColor = MaterialTheme.colorScheme.onSurface,
         shape = RoundedCornerShape(16.dp),
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     imageVector = Icons.Filled.Settings,
                     contentDescription = "Pengaturan",
-                    tint = Color(0xFFE50914)
+                    tint = MaterialTheme.colorScheme.primary
                 )
                 Spacer(modifier = Modifier.width(12.dp))
                 Text(
                     text = "Pengaturan Putar",
-                    fontSize = 18.sp,
+                    style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -54,35 +59,39 @@ fun PlayerSettingsDialog(
             Column {
                 Text(
                     text = "Kecepatan Putar",
-                    color = Color(0xFF94A3B8),
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelLarge
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    listOf(0.5f, 1.0f, 1.25f, 1.5f, 2.0f).forEach { speed ->
+                    speedOptions.forEach { speed ->
                         val isSelected = playbackSpeed == speed
                         Box(
                             modifier = Modifier
                                 .weight(1f)
+                                .defaultMinSize(minHeight = 48.dp)
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(if (isSelected) Color(0xFFE50914) else Color(0xFF202330))
+                                .background(
+                                    if (isSelected) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.surfaceContainerHigh
+                                )
                                 .border(
                                     1.dp,
-                                    if (isSelected) Color(0xFFFF5252) else Color.Transparent,
+                                    if (isSelected) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.outline,
                                     RoundedCornerShape(8.dp)
                                 )
                                 .clickable { onSpeedSelected(speed) }
-                                .padding(vertical = 8.dp),
+                                .testTag("speed_option_$speed"),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 text = "${speed}x",
                                 color = Color.White,
-                                fontSize = 12.sp,
+                                style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.Bold
                             )
                         }
@@ -92,36 +101,41 @@ fun PlayerSettingsDialog(
                 Spacer(modifier = Modifier.height(20.dp))
 
                 Text(
-                    text = "Kualitas Resolusi (HLS Track Selection)",
-                    color = Color(0xFF94A3B8),
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold
+                    text = "Resolusi Video",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelLarge
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                Row(
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    listOf("Auto", "360p", "480p", "720p", "1080p").forEach { res ->
-                        val isSelected = currentQuality == res
+                    qualityList.forEach { res ->
+                        val isSelected = currentQuality.equals(res, ignoreCase = true)
                         Box(
                             modifier = Modifier
-                                .weight(1f)
+                                .defaultMinSize(minWidth = 56.dp, minHeight = 48.dp)
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(if (isSelected) Color(0xFFE50914) else Color(0xFF202330))
+                                .background(
+                                    if (isSelected) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.surfaceContainerHigh
+                                )
                                 .border(
                                     1.dp,
-                                    if (isSelected) Color(0xFFFF5252) else Color.Transparent,
+                                    if (isSelected) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.outline,
                                     RoundedCornerShape(8.dp)
                                 )
                                 .clickable { onQualitySelected(res) }
-                                .padding(vertical = 8.dp),
+                                .padding(horizontal = 12.dp)
+                                .testTag("quality_option_$res"),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 text = res,
                                 color = Color.White,
-                                fontSize = 11.sp,
+                                style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.Bold
                             )
                         }
@@ -132,8 +146,9 @@ fun PlayerSettingsDialog(
         confirmButton = {
             Button(
                 onClick = onDismissRequest,
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE50914)),
-                shape = RoundedCornerShape(8.dp)
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.defaultMinSize(minHeight = 48.dp)
             ) {
                 Text("Selesai", color = Color.White, fontWeight = FontWeight.Bold)
             }

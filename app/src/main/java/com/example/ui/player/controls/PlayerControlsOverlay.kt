@@ -1,8 +1,5 @@
 package com.example.ui.player.controls
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,16 +19,21 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.media3.ui.AspectRatioFrameLayout
+import com.example.ui.theme.AmberGold
+import com.example.ui.theme.CrimsonPrimary
+import com.example.ui.theme.CrimsonPrimaryPressed
+import com.example.ui.theme.SkyAccent
 import com.example.utils.FormatUtils
 
 /**
  * Overlay kontrol video player (Top Bar, Center Playback Buttons, Bottom Progress Bar).
- * Mendukung status terkunci (screen lock) dan penyesuaian otomatis untuk orientasi Fullscreen.
+ * Semua tombol memenuhi target sentuh aksesibilitas minimum 48.dp.
  */
 @Composable
 fun PlayerControlsOverlay(
@@ -49,10 +51,16 @@ fun PlayerControlsOverlay(
     currentTimeString: String,
     currentEpisodeIndex: Int,
     totalEpisodes: Int,
+    hasPrevEpisode: Boolean = currentEpisodeIndex > 0,
+    hasNextEpisode: Boolean = currentEpisodeIndex in 0 until (totalEpisodes - 1),
+    showSkipIntro: Boolean = false,
     onPlayPauseToggle: () -> Unit,
     onSeek: (Long) -> Unit,
     onRewind10: () -> Unit,
     onForward10: () -> Unit,
+    onSkipIntro: () -> Unit = {},
+    onPrevEpisode: () -> Unit = {},
+    onNextEpisode: () -> Unit = {},
     onEpisodeChange: (Int) -> Unit,
     onPlaybackSpeedCycle: () -> Unit,
     onLockToggle: () -> Unit,
@@ -71,40 +79,45 @@ fun PlayerControlsOverlay(
             .background(
                 Brush.verticalGradient(
                     listOf(
-                        Color.Black.copy(alpha = 0.75f),
+                        Color.Black.copy(alpha = 0.78f),
                         Color.Transparent,
-                        Color.Black.copy(alpha = 0.85f)
+                        Color.Black.copy(alpha = 0.88f)
                     )
                 )
             )
             .pointerInput(Unit) {
-                detectTapGestures(
-                    onTap = { onDismissControls() }
-                )
+                detectTapGestures(onTap = { onDismissControls() })
             }
     ) {
         if (isLocked) {
-            // Mode Terkunci: Hanya tampilkan tombol unlock di pojok kiri atas
             IconButton(
                 onClick = onLockToggle,
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(16.dp)
-                    .background(Color.Black.copy(alpha = 0.6f), CircleShape)
-                    .size(42.dp)
+                    .padding(12.dp)
+                    .size(48.dp)
+                    .testTag("player_unlock_btn")
             ) {
-                Icon(
-                    imageVector = Icons.Filled.Lock,
-                    contentDescription = "Buka Kunci Layar",
-                    tint = Color.White
-                )
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(Color.Black.copy(alpha = 0.65f), CircleShape)
+                        .border(1.dp, Color.White.copy(alpha = 0.2f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Lock,
+                        contentDescription = "Buka Kunci Layar",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
             }
         } else {
             Column(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
-                // 1. Top Controls Bar
                 PlayerTopBar(
                     title = title,
                     isFullscreen = isFullscreen,
@@ -117,19 +130,30 @@ fun PlayerControlsOverlay(
                     onLockToggle = onLockToggle
                 )
 
-                // 2. Center Playback Controls (Prev, Rewind 10s, Play/Pause, Forward 10s, Next)
                 PlayerCenterControls(
                     isPlaying = isPlaying,
                     isFullscreen = isFullscreen,
-                    currentEpisodeIndex = currentEpisodeIndex,
-                    totalEpisodes = totalEpisodes,
+                    hasPrevEpisode = hasPrevEpisode,
+                    hasNextEpisode = hasNextEpisode,
                     onPlayPauseToggle = onPlayPauseToggle,
                     onRewind10 = onRewind10,
                     onForward10 = onForward10,
-                    onEpisodeChange = onEpisodeChange
+                    onPrevEpisode = {
+                        if (hasPrevEpisode) {
+                            onPrevEpisode()
+                        } else if (currentEpisodeIndex > 0) {
+                            onEpisodeChange(currentEpisodeIndex - 1)
+                        }
+                    },
+                    onNextEpisode = {
+                        if (hasNextEpisode) {
+                            onNextEpisode()
+                        } else if (currentEpisodeIndex < totalEpisodes - 1) {
+                            onEpisodeChange(currentEpisodeIndex + 1)
+                        }
+                    }
                 )
 
-                // 3. Bottom Controls Bar (Slider, Timestamp, Speed, Server, Aspect, Fullscreen)
                 PlayerBottomBar(
                     currentPosition = currentPosition,
                     duration = duration,
@@ -137,7 +161,9 @@ fun PlayerControlsOverlay(
                     currentServerName = currentServerName,
                     resizeMode = resizeMode,
                     isFullscreen = isFullscreen,
+                    showSkipIntro = showSkipIntro,
                     onSeek = onSeek,
+                    onSkipIntro = onSkipIntro,
                     onPlaybackSpeedCycle = onPlaybackSpeedCycle,
                     onServerSelectorClick = onServerSelectorClick,
                     onToggleAspectRatio = onToggleAspectRatio,
@@ -169,8 +195,8 @@ private fun PlayerTopBar(
                 )
             )
             .padding(
-                horizontal = if (isFullscreen) 14.dp else 10.dp,
-                vertical = if (isFullscreen) 8.dp else 4.dp
+                horizontal = if (isFullscreen) 12.dp else 4.dp,
+                vertical = if (isFullscreen) 6.dp else 2.dp
             ),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -178,17 +204,25 @@ private fun PlayerTopBar(
             IconButton(
                 onClick = onBack,
                 modifier = Modifier
-                    .background(Color.White.copy(alpha = 0.15f), CircleShape)
-                    .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                    .size(28.dp)
+                    .size(48.dp)
+                    .testTag("player_back_btn")
             ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Kembali",
-                    tint = Color.White,
-                    modifier = Modifier.size(15.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .background(Color.White.copy(alpha = 0.14f), CircleShape)
+                        .border(0.5.dp, Color.White.copy(alpha = 0.22f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Kembali",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
             }
+        } else {
             Spacer(modifier = Modifier.width(8.dp))
         }
 
@@ -196,35 +230,36 @@ private fun PlayerTopBar(
         Text(
             text = formattedEpTitle,
             color = Color.White,
-            fontSize = if (isFullscreen) 13.sp else 11.sp,
-            fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.labelLarge.copy(
+                fontSize = if (isFullscreen) 14.sp else 12.sp,
+                fontWeight = FontWeight.SemiBold
+            ),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
 
         if (isFullscreen) {
-            // Indikator Baterai dan Jam
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .clip(RoundedCornerShape(6.dp))
                     .background(Color.White.copy(alpha = 0.12f))
                     .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 6.dp, vertical = 2.5.dp)
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
             ) {
                 Icon(
                     imageVector = if (batteryLevel in 0..20) Icons.Filled.BatteryAlert else Icons.Filled.BatteryFull,
-                    contentDescription = "Baterai",
-                    tint = if (batteryLevel in 0..20) Color(0xFFFF5252) else Color.White.copy(alpha = 0.85f),
+                    contentDescription = "Status Baterai",
+                    tint = if (batteryLevel in 0..20) MaterialTheme.colorScheme.error else Color.White.copy(alpha = 0.9f),
                     modifier = Modifier.size(12.dp)
                 )
                 if (batteryLevel >= 0) {
                     Spacer(modifier = Modifier.width(3.dp))
                     Text(
                         text = "$batteryLevel%",
-                        color = Color.White.copy(alpha = 0.85f),
-                        fontSize = 9.sp,
+                        color = Color.White.copy(alpha = 0.9f),
+                        fontSize = 10.sp,
                         fontWeight = FontWeight.Medium
                     )
                 }
@@ -232,8 +267,8 @@ private fun PlayerTopBar(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = currentTimeString,
-                        color = Color.White.copy(alpha = 0.85f),
-                        fontSize = 9.sp,
+                        color = Color.White.copy(alpha = 0.9f),
+                        fontSize = 10.sp,
                         fontWeight = FontWeight.Medium
                     )
                 }
@@ -241,70 +276,87 @@ private fun PlayerTopBar(
 
             Spacer(modifier = Modifier.width(6.dp))
 
-            // Indikator Bitrate / Resolusi HLS
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(6.dp))
                     .background(Color.White.copy(alpha = 0.12f))
-                    .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                    .border(0.5.dp, SkyAccent.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
             ) {
                 Text(
-                    text = bandwidthSpeedText.ifEmpty { "HD" },
-                    color = Color(0xFF00F2FE),
-                    fontSize = 9.sp,
+                    text = bandwidthSpeedText.ifEmpty { "Auto" },
+                    color = SkyAccent,
+                    fontSize = 10.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
 
-            Spacer(modifier = Modifier.width(6.dp))
+            Spacer(modifier = Modifier.width(4.dp))
         }
 
-        // Tombol Switch ke Web Engine Sandbox
+        // Switch to WebView Sandbox button with accessible touch area
         Box(
             modifier = Modifier
-                .clip(RoundedCornerShape(6.dp))
-                .background(Color.White.copy(alpha = 0.12f))
-                .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
-                .clickable { onSwitchToWeb() }
-                .padding(horizontal = 6.dp, vertical = 2.dp)
+                .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                .clickable(onClick = onSwitchToWeb)
+                .padding(horizontal = 4.dp)
+                .testTag("player_switch_web_btn"),
+            contentAlignment = Alignment.Center
         ) {
-            Text("Web", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color.White.copy(alpha = 0.14f))
+                    .border(0.5.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text("Web", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            }
         }
 
-        Spacer(modifier = Modifier.width(4.dp))
-
-        // Tombol Pengaturan (Settings)
         IconButton(
             onClick = onSettingsClick,
             modifier = Modifier
-                .background(Color.White.copy(alpha = 0.15f), CircleShape)
-                .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                .size(if (isFullscreen) 28.dp else 24.dp)
+                .size(48.dp)
+                .testTag("player_settings_btn")
         ) {
-            Icon(
-                imageVector = Icons.Filled.Settings,
-                contentDescription = "Pengaturan",
-                tint = Color.White,
-                modifier = Modifier.size(if (isFullscreen) 15.dp else 13.dp)
-            )
+            Box(
+                modifier = Modifier
+                    .size(30.dp)
+                    .background(Color.White.copy(alpha = 0.14f), CircleShape)
+                    .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Settings,
+                    contentDescription = "Pengaturan Putar",
+                    tint = Color.White,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
         }
 
         if (isFullscreen) {
-            Spacer(modifier = Modifier.width(4.dp))
             IconButton(
                 onClick = onLockToggle,
                 modifier = Modifier
-                    .background(Color.White.copy(alpha = 0.15f), CircleShape)
-                    .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                    .size(28.dp)
+                    .size(48.dp)
+                    .testTag("player_lock_btn")
             ) {
-                Icon(
-                    imageVector = Icons.Filled.LockOpen,
-                    contentDescription = "Kunci Layar",
-                    tint = Color.White,
-                    modifier = Modifier.size(15.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .background(Color.White.copy(alpha = 0.14f), CircleShape)
+                        .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.LockOpen,
+                        contentDescription = "Kunci Layar",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
             }
         }
     }
@@ -314,110 +366,139 @@ private fun PlayerTopBar(
 private fun PlayerCenterControls(
     isPlaying: Boolean,
     isFullscreen: Boolean,
-    currentEpisodeIndex: Int,
-    totalEpisodes: Int,
+    hasPrevEpisode: Boolean,
+    hasNextEpisode: Boolean,
     onPlayPauseToggle: () -> Unit,
     onRewind10: () -> Unit,
     onForward10: () -> Unit,
-    onEpisodeChange: (Int) -> Unit
+    onPrevEpisode: () -> Unit,
+    onNextEpisode: () -> Unit
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Episode Sebelumnya (Fullscreen saja)
-        if (isFullscreen && totalEpisodes > 1 && currentEpisodeIndex > 0) {
+        if (isFullscreen && hasPrevEpisode) {
             IconButton(
-                onClick = { onEpisodeChange(currentEpisodeIndex - 1) },
+                onClick = onPrevEpisode,
                 modifier = Modifier
-                    .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                    .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                    .size(28.dp)
+                    .size(48.dp)
+                    .testTag("player_prev_episode_btn")
             ) {
-                Icon(
-                    imageVector = Icons.Filled.SkipPrevious,
-                    contentDescription = "Episode Sebelumnya",
-                    tint = Color.White,
-                    modifier = Modifier.size(15.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .background(Color.Black.copy(alpha = 0.55f), CircleShape)
+                        .border(0.5.dp, Color.White.copy(alpha = 0.24f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.SkipPrevious,
+                        contentDescription = "Episode Sebelumnya",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
             }
-            Spacer(modifier = Modifier.width(if (isFullscreen) 14.dp else 10.dp))
+            Spacer(modifier = Modifier.width(8.dp))
         }
 
-        // Mundur 10 Detik
         IconButton(
             onClick = onRewind10,
             modifier = Modifier
-                .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                .size(if (isFullscreen) 32.dp else 26.dp)
+                .size(48.dp)
+                .testTag("player_rewind_btn")
         ) {
-            Icon(
-                imageVector = Icons.Filled.Replay10,
-                contentDescription = "Mundur 10 Detik",
-                tint = Color.White,
-                modifier = Modifier.size(if (isFullscreen) 16.dp else 14.dp)
-            )
+            Box(
+                modifier = Modifier
+                    .size(if (isFullscreen) 36.dp else 32.dp)
+                    .background(Color.Black.copy(alpha = 0.55f), CircleShape)
+                    .border(0.5.dp, Color.White.copy(alpha = 0.24f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Replay10,
+                    contentDescription = "Mundur 10 Detik",
+                    tint = Color.White,
+                    modifier = Modifier.size(if (isFullscreen) 18.dp else 16.dp)
+                )
+            }
         }
 
-        Spacer(modifier = Modifier.width(if (isFullscreen) 14.dp else 10.dp))
+        Spacer(modifier = Modifier.width(if (isFullscreen) 14.dp else 8.dp))
 
-        // Play / Pause Button dengan Radiant Red Accent
         IconButton(
             onClick = onPlayPauseToggle,
             modifier = Modifier
-                .background(
-                    Brush.radialGradient(
-                        listOf(Color(0xFFE50914), Color(0xFFB00610))
-                    ),
-                    CircleShape
-                )
-                .border(1.dp, Color.White.copy(alpha = 0.3f), CircleShape)
-                .size(if (isFullscreen) 40.dp else 34.dp)
+                .size(52.dp)
+                .testTag("player_play_pause_btn")
         ) {
-            Icon(
-                imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                contentDescription = if (isPlaying) "Jeda" else "Putar",
-                tint = Color.White,
-                modifier = Modifier.size(if (isFullscreen) 22.dp else 18.dp)
-            )
+            Box(
+                modifier = Modifier
+                    .size(if (isFullscreen) 46.dp else 40.dp)
+                    .background(
+                        Brush.radialGradient(listOf(CrimsonPrimary, CrimsonPrimaryPressed)),
+                        CircleShape
+                    )
+                    .border(1.dp, Color.White.copy(alpha = 0.35f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    contentDescription = if (isPlaying) "Jeda" else "Putar",
+                    tint = Color.White,
+                    modifier = Modifier.size(if (isFullscreen) 24.dp else 20.dp)
+                )
+            }
         }
 
-        Spacer(modifier = Modifier.width(if (isFullscreen) 14.dp else 10.dp))
+        Spacer(modifier = Modifier.width(if (isFullscreen) 14.dp else 8.dp))
 
-        // Maju 10 Detik
         IconButton(
             onClick = onForward10,
             modifier = Modifier
-                .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                .size(if (isFullscreen) 32.dp else 26.dp)
+                .size(48.dp)
+                .testTag("player_forward_btn")
         ) {
-            Icon(
-                imageVector = Icons.Filled.Forward10,
-                contentDescription = "Maju 10 Detik",
-                tint = Color.White,
-                modifier = Modifier.size(if (isFullscreen) 16.dp else 14.dp)
-            )
-        }
-
-        // Episode Selanjutnya (Fullscreen saja)
-        if (isFullscreen && totalEpisodes > 1 && currentEpisodeIndex < totalEpisodes - 1) {
-            Spacer(modifier = Modifier.width(if (isFullscreen) 14.dp else 10.dp))
-            IconButton(
-                onClick = { onEpisodeChange(currentEpisodeIndex + 1) },
+            Box(
                 modifier = Modifier
-                    .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                    .border(0.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                    .size(28.dp)
+                    .size(if (isFullscreen) 36.dp else 32.dp)
+                    .background(Color.Black.copy(alpha = 0.55f), CircleShape)
+                    .border(0.5.dp, Color.White.copy(alpha = 0.24f), CircleShape),
+                contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = Icons.Filled.SkipNext,
-                    contentDescription = "Episode Selanjutnya",
+                    imageVector = Icons.Filled.Forward10,
+                    contentDescription = "Maju 10 Detik",
                     tint = Color.White,
-                    modifier = Modifier.size(15.dp)
+                    modifier = Modifier.size(if (isFullscreen) 18.dp else 16.dp)
                 )
+            }
+        }
+
+        if (isFullscreen && hasNextEpisode) {
+            Spacer(modifier = Modifier.width(8.dp))
+            IconButton(
+                onClick = onNextEpisode,
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("player_next_episode_btn")
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .background(Color.Black.copy(alpha = 0.55f), CircleShape)
+                        .border(0.5.dp, Color.White.copy(alpha = 0.24f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.SkipNext,
+                        contentDescription = "Episode Selanjutnya",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
             }
         }
     }
@@ -431,7 +512,9 @@ private fun PlayerBottomBar(
     currentServerName: String,
     resizeMode: Int,
     isFullscreen: Boolean,
+    showSkipIntro: Boolean,
     onSeek: (Long) -> Unit,
+    onSkipIntro: () -> Unit,
     onPlaybackSpeedCycle: () -> Unit,
     onServerSelectorClick: () -> Unit,
     onToggleAspectRatio: () -> Unit,
@@ -442,15 +525,14 @@ private fun PlayerBottomBar(
             .fillMaxWidth()
             .background(
                 Brush.verticalGradient(
-                    listOf(Color.Transparent, Color.Black.copy(alpha = 0.9f))
+                    listOf(Color.Transparent, Color.Black.copy(alpha = 0.92f))
                 )
             )
             .padding(
                 horizontal = if (isFullscreen) 14.dp else 8.dp,
-                vertical = if (isFullscreen) 8.dp else 4.dp
+                vertical = if (isFullscreen) 6.dp else 2.dp
             )
     ) {
-        // Slider Scrubbing
         Slider(
             value = if (duration > 0) (currentPosition.toFloat() / duration).coerceIn(0f, 1f) else 0f,
             onValueChange = { frac ->
@@ -458,13 +540,14 @@ private fun PlayerBottomBar(
                 onSeek(target)
             },
             colors = SliderDefaults.colors(
-                thumbColor = Color(0xFFE50914),
-                activeTrackColor = Color(0xFFE50914),
+                thumbColor = CrimsonPrimary,
+                activeTrackColor = CrimsonPrimary,
                 inactiveTrackColor = Color.White.copy(alpha = 0.25f)
             ),
             modifier = Modifier
                 .fillMaxWidth()
-                .height(if (isFullscreen) 16.dp else 12.dp)
+                .height(if (isFullscreen) 24.dp else 20.dp)
+                .testTag("player_seek_slider")
         )
 
         Row(
@@ -472,98 +555,154 @@ private fun PlayerBottomBar(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Label Posisi / Durasi
             Text(
                 text = "${FormatUtils.formatTime(currentPosition)} / ${FormatUtils.formatTime(duration)}",
                 color = Color.White,
-                fontSize = if (isFullscreen) 11.sp else 9.sp,
-                fontWeight = FontWeight.Medium
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontSize = if (isFullscreen) 11.sp else 10.sp
+                )
             )
 
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Quick Playback Speed Pill
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(Color.White.copy(alpha = 0.12f))
-                        .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(4.dp))
-                        .clickable { onPlaybackSpeedCycle() }
-                        .padding(horizontal = 5.dp, vertical = 2.dp)
-                ) {
-                    Text(
-                        text = "${playbackSpeed}x",
-                        color = Color.White,
-                        fontSize = if (isFullscreen) 10.sp else 8.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                if (showSkipIntro) {
+                    Box(
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .clickable(onClick = onSkipIntro)
+                            .padding(horizontal = 4.dp)
+                            .testTag("player_skip_intro_btn"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(AmberGold.copy(alpha = 0.22f))
+                                .border(0.75.dp, AmberGold.copy(alpha = 0.7f), RoundedCornerShape(4.dp))
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Filled.FastForward,
+                                    contentDescription = "Lewati Intro 85 detik",
+                                    tint = AmberGold,
+                                    modifier = Modifier.size(11.dp)
+                                )
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text(
+                                    text = "+85d",
+                                    color = AmberGold,
+                                    fontSize = if (isFullscreen) 10.sp else 9.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
                 }
 
-                if (isFullscreen) {
-                    Spacer(modifier = Modifier.width(6.dp))
-
-                    // Server Selector Pill
+                Box(
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        .clickable(onClick = onPlaybackSpeedCycle)
+                        .padding(horizontal = 4.dp)
+                        .testTag("player_speed_btn"),
+                    contentAlignment = Alignment.Center
+                ) {
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
-                            .background(Color.White.copy(alpha = 0.12f))
-                            .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(4.dp))
-                            .clickable { onServerSelectorClick() }
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                            .background(Color.White.copy(alpha = 0.14f))
+                            .border(0.5.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(4.dp))
+                            .padding(horizontal = 7.dp, vertical = 3.dp)
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Filled.Dns,
-                                contentDescription = null,
-                                tint = Color(0xFFFFC107),
-                                modifier = Modifier.size(10.dp)
-                            )
-                            Spacer(modifier = Modifier.width(3.dp))
-                            Text(
-                                text = currentServerName,
-                                color = Color.White,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.width(6.dp))
-
-                    // Toggle Aspect Ratio (Fit, Zoom, Fill)
-                    IconButton(
-                        onClick = onToggleAspectRatio,
-                        modifier = Modifier
-                            .background(Color.White.copy(alpha = 0.12f), CircleShape)
-                            .size(26.dp)
-                    ) {
-                        Icon(
-                            imageVector = when (resizeMode) {
-                                AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> Icons.Filled.ZoomOutMap
-                                AspectRatioFrameLayout.RESIZE_MODE_FILL -> Icons.Filled.FitScreen
-                                else -> Icons.Filled.AspectRatio
-                            },
-                            contentDescription = "Aspek Rasio",
-                            tint = Color.White,
-                            modifier = Modifier.size(14.dp)
+                        Text(
+                            text = "${playbackSpeed}x",
+                            color = Color.White,
+                            fontSize = if (isFullscreen) 10.sp else 9.sp,
+                            fontWeight = FontWeight.Bold
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.width(4.dp))
+                if (isFullscreen) {
+                    Box(
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .clickable(onClick = onServerSelectorClick)
+                            .padding(horizontal = 4.dp)
+                            .testTag("player_server_btn"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color.White.copy(alpha = 0.14f))
+                                .border(0.5.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(4.dp))
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Filled.Dns,
+                                    contentDescription = "Pilih Server",
+                                    tint = AmberGold,
+                                    modifier = Modifier.size(11.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = currentServerName,
+                                    color = Color.White,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
 
-                // Toggle Fullscreen
+                    IconButton(
+                        onClick = onToggleAspectRatio,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("player_aspect_btn")
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(30.dp)
+                                .background(Color.White.copy(alpha = 0.14f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = when (resizeMode) {
+                                    AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> Icons.Filled.ZoomOutMap
+                                    AspectRatioFrameLayout.RESIZE_MODE_FILL -> Icons.Filled.FitScreen
+                                    else -> Icons.Filled.AspectRatio
+                                },
+                                contentDescription = "Aspek Rasio",
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+
                 IconButton(
                     onClick = onToggleFullscreen,
                     modifier = Modifier
-                        .background(Color.White.copy(alpha = 0.12f), CircleShape)
-                        .size(if (isFullscreen) 26.dp else 22.dp)
+                        .size(48.dp)
+                        .testTag("player_fullscreen_btn")
                 ) {
-                    Icon(
-                        imageVector = if (isFullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
-                        contentDescription = "Layar Penuh",
-                        tint = Color.White,
-                        modifier = Modifier.size(if (isFullscreen) 14.dp else 13.dp)
-                    )
+                    Box(
+                        modifier = Modifier
+                            .size(30.dp)
+                            .background(Color.White.copy(alpha = 0.14f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (isFullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                            contentDescription = if (isFullscreen) "Keluar Layar Penuh" else "Layar Penuh",
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
                 }
             }
         }

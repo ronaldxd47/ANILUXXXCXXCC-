@@ -1,66 +1,75 @@
 package com.example.data
 
+import com.example.data.cache.TtlMemoryCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * Repository yang mengabstraksi pengambilan data jadwal rilis (release schedule).
- * Mengagregasi data dari Anichin, Samehadaku, dan Donghub secara modular dan aman untuk migrasi masa depan.
+ * Interface Repository yang mengabstraksi pengambilan jadwal rilis (release schedule).
+ * Siap dimigrasi ke endpoint REST API backend di masa depan tanpa mengubah ViewModel/UI.
  */
-class ScheduleRepository {
+interface ScheduleRepository {
+    suspend fun getReleaseSchedule(forceRefresh: Boolean = false): List<ScheduleDay>
+    fun invalidateCache()
 
-    /**
-     * Mengambil data jadwal rilis dari seluruh sumber anime/donghua scrapers secara paralel.
-     * Dibangun asinkron menggunakan Coroutines agar siap diubah menjadi Retrofit API fetch ke backend di masa depan.
-     */
-    suspend fun getReleaseSchedule(): List<ScheduleDay> = withContext(Dispatchers.IO) {
+    companion object {
+        operator fun invoke(): ScheduleRepository = MultiSourceScheduleRepository()
+    }
+}
+
+/**
+ * Implementasi multi-source ScheduleRepository yang menggabungkan jadwal dari
+ * Samehadaku, Anichin, Donghive/Donghub, dan MyAnimeList dengan TTL caching 10 menit.
+ */
+class MultiSourceScheduleRepository : ScheduleRepository {
+
+    companion object {
+        private const val SCHEDULE_CACHE_KEY = "combined_schedule"
+        private const val SCHEDULE_TTL_MS = 10 * 60 * 1000L
+    }
+
+    private val cache = TtlMemoryCache<String, List<ScheduleDay>>(defaultTtlMs = SCHEDULE_TTL_MS, maxEntries = 2)
+
+    override suspend fun getReleaseSchedule(forceRefresh: Boolean): List<ScheduleDay> = withContext(Dispatchers.IO) {
+        cache.getOrFetch(
+            key = SCHEDULE_CACHE_KEY,
+            forceRefresh = forceRefresh,
+            shouldCache = { !it.isNullOrEmpty() }
+        ) {
+            fetchCombinedSchedule()
+        } ?: emptyList()
+    }
+
+    override fun invalidateCache() {
+        cache.clear()
+    }
+
+    private suspend fun fetchCombinedSchedule(): List<ScheduleDay> {
         val daysList = listOf("Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu")
         val combinedMap = daysList.associateWith { mutableListOf<ScheduleAnime>() }.toMutableMap()
 
         try {
-            kotlinx.coroutines.withTimeoutOrNull(8000) {
-                coroutineScope {
-                    val anichinDef = async { try { AnichinScraper.fetchSchedule() } catch (e: Exception) { emptyList() } }
-                    val samehadakuDef = async { try { SamehadakuScraper.fetchSchedule() } catch (e: Exception) { emptyList() } }
-                    val donghubDef = async { try { DonghubScraper.fetchSchedule() } catch (e: Exception) { emptyList() } }
-                    val malDef = async { try { MalScraper.fetchSchedule() } catch (e: Exception) { emptyList() } }
+            withTimeoutOrNull(12000L) {
+                supervisorScope {
+                    val anichinDef = async { safeScheduleSource("Anichin") { AnichinScraper.fetchSchedule() } }
+                    val samehadakuDef = async { safeScheduleSource("Samehadaku") { SamehadakuScraper.fetchSchedule() } }
+                    val donghubDef = async { safeScheduleSource("Donghub") { DonghubScraper.fetchSchedule() } }
+                    val malDef = async { safeScheduleSource("MAL") { MalScraper.fetchSchedule() } }
 
-                    val results = kotlinx.coroutines.awaitAll(anichinDef, samehadakuDef, donghubDef, malDef)
-                    val anichinRes = results[0]
-                    val samehadakuRes = results[1]
-                    val donghubRes = results[2]
-                    val malRes = results[3]
-
-                    fun mergeSchedules(schedules: List<ScheduleDay>) {
-                        for (scheduleDay in schedules) {
-                            val rawDay = scheduleDay.day.trim()
-                            val matchedDay = daysList.find { it.equals(rawDay, ignoreCase = true) || rawDay.contains(it, ignoreCase = true) }
-                                ?: rawDay
-
-                            val targetList = combinedMap.getOrPut(matchedDay) { mutableListOf() }
-                            for (anime in scheduleDay.animeList) {
-                                val cleanTitle = anime.title.replace("[SVIP]", "").trim()
-                                if (targetList.none { 
-                                    it.link == anime.link || 
-                                    it.title.equals(cleanTitle, ignoreCase = true) ||
-                                    (it.title.length > 5 && cleanTitle.length > 5 && (it.title.contains(cleanTitle, ignoreCase = true) || cleanTitle.contains(it.title, ignoreCase = true)))
-                                }) {
-                                    targetList.add(anime)
-                                }
-                            }
-                        }
+                    val results = awaitAll(samehadakuDef, anichinDef, donghubDef, malDef)
+                    results.forEach { schedules ->
+                        mergeSchedules(schedules, daysList, combinedMap)
                     }
-
-                    mergeSchedules(samehadakuRes)
-                    mergeSchedules(anichinRes)
-                    mergeSchedules(donghubRes)
-                    mergeSchedules(malRes)
                 }
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
-            android.util.Log.e("ScheduleRepository", "Error fetching combined schedule", e)
+            android.util.Log.e("ScheduleRepository", "Error fetching combined schedule: ${e.message}")
         }
 
         val result = mutableListOf<ScheduleDay>()
@@ -77,6 +86,47 @@ class ScheduleRepository {
             }
         }
 
-        result
+        return result
+    }
+
+    private suspend inline fun safeScheduleSource(
+        source: String,
+        crossinline block: suspend () -> List<ScheduleDay>
+    ): List<ScheduleDay> {
+        return try {
+            block()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("ScheduleRepository", "$source schedule failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    private fun mergeSchedules(
+        schedules: List<ScheduleDay>,
+        daysList: List<String>,
+        combinedMap: MutableMap<String, MutableList<ScheduleAnime>>
+    ) {
+        for (scheduleDay in schedules) {
+            val rawDay = scheduleDay.day.trim()
+            val matchedDay = BaseAnimestreamScraper.normalizeDayName(rawDay)
+                ?: daysList.find { it.equals(rawDay, ignoreCase = true) || rawDay.contains(it, ignoreCase = true) }
+                ?: rawDay
+
+            val targetList = combinedMap.getOrPut(matchedDay) { mutableListOf() }
+            for (anime in scheduleDay.animeList) {
+                val cleanTitle = anime.title.replace("[SVIP]", "").trim()
+                if (targetList.none {
+                        it.link == anime.link ||
+                            it.title.equals(cleanTitle, ignoreCase = true) ||
+                            (it.title.length > 5 && cleanTitle.length > 5 &&
+                                (it.title.contains(cleanTitle, ignoreCase = true) || cleanTitle.contains(it.title, ignoreCase = true)))
+                    }
+                ) {
+                    targetList.add(anime)
+                }
+            }
+        }
     }
 }

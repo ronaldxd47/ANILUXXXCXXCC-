@@ -1,49 +1,58 @@
 package com.example.ui.screens
 
-import com.example.utils.FormatUtils
-
-
-
-
-import android.widget.Toast
-import androidx.compose.animation.*
-import androidx.compose.animation.core.*
-import androidx.compose.foundation.*
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.*
-import androidx.compose.foundation.shape.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.*
-import androidx.compose.ui.draw.*
-import androidx.compose.ui.graphics.*
-import androidx.compose.ui.layout.*
-import androidx.compose.ui.platform.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.*
-import androidx.compose.ui.unit.*
-import coil.compose.AsyncImage
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import com.example.data.AnimeSource
+import com.example.data.ScrapedAnime
 import com.example.ui.AnimeViewModel
 import com.example.ui.Screen
 import com.example.ui.UiState
 import com.example.ui.components.*
-
-import com.example.data.*
+import com.example.ui.theme.AmberGold
+import com.example.utils.FormatUtils
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DetailScreen(viewModel: AnimeViewModel) {
     val animeDetailState by viewModel.animeDetail.collectAsState()
     val bookmarkedAnime by viewModel.bookmarkedAnime.collectAsState()
-    val selectedUrl = viewModel.selectedAnimeUrl.value ?: ""
+    val selectedUrl = viewModel.selectedAnimeUrl.collectAsState().value.orEmpty()
+
+    var sortDescending by remember(selectedUrl) { mutableStateOf(true) }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0A0A0F))
+            .background(MaterialTheme.colorScheme.background)
     ) {
         when (val state = animeDetailState) {
             is UiState.Loading -> {
@@ -52,321 +61,310 @@ fun DetailScreen(viewModel: AnimeViewModel) {
                         .fillMaxSize()
                         .verticalScroll(rememberScrollState())
                 ) {
-                    SkeletonBox(modifier = Modifier.fillMaxWidth().height(300.dp), shape = RoundedCornerShape(0.dp))
+                    SkeletonBox(modifier = Modifier.fillMaxWidth().height(320.dp), shape = RoundedCornerShape(0.dp))
                     Spacer(modifier = Modifier.height(16.dp))
-                    SkeletonBox(modifier = Modifier.fillMaxWidth(0.5f).height(30.dp).padding(horizontal = 20.dp), shape = RoundedCornerShape(4.dp))
-                    Spacer(modifier = Modifier.height(8.dp))
-                    SkeletonBox(modifier = Modifier.fillMaxWidth(0.8f).height(20.dp).padding(horizontal = 20.dp), shape = RoundedCornerShape(4.dp))
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Row(modifier = Modifier.padding(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        SkeletonBox(modifier = Modifier.weight(1f).height(40.dp), shape = RoundedCornerShape(50))
-                        SkeletonBox(modifier = Modifier.weight(1f).height(40.dp), shape = RoundedCornerShape(50))
+                    Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+                        SkeletonBox(modifier = Modifier.fillMaxWidth(0.65f).height(28.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
+                        SkeletonBox(modifier = Modifier.fillMaxWidth(0.9f).height(18.dp))
+                        Spacer(modifier = Modifier.height(20.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            SkeletonBox(modifier = Modifier.weight(1f).height(48.dp))
+                            SkeletonBox(modifier = Modifier.weight(1f).height(48.dp))
+                        }
                     }
                 }
             }
+
             is UiState.Success -> {
                 val detail = state.data
-                val isSaved = viewModel.isBookmarked(selectedUrl)
+                val isSaved = remember(bookmarkedAnime, selectedUrl) {
+                    bookmarkedAnime.any { it.link == selectedUrl }
+                }
+                val isDonghua = remember(selectedUrl) { AnimeSource.isDonghuaUrl(selectedUrl) }
+                val source = remember(selectedUrl) { AnimeSource.fromUrl(selectedUrl) }
+                val lastProgress = remember(selectedUrl, detail.episodes) {
+                    viewModel.getLastEpisodeProgress(selectedUrl)
+                }
 
-                val titleHash = detail.title.hashCode().let { if (it < 0) -it else it }
-                val scheduleDay = when {
-                    detail.title.contains("Battle Through", ignoreCase = true) -> "Minggu"
-                    detail.title.contains("Throne of Seal", ignoreCase = true) -> "Kamis"
-                    detail.title.contains("Renegade", ignoreCase = true) -> "Senin"
-                    detail.title.contains("Slay", ignoreCase = true) -> "Selasa"
-                    detail.title.contains("Against the Gods", ignoreCase = true) -> "Jumat"
-                    else -> when (titleHash % 7) {
-                        0 -> "Senin"
-                        1 -> "Selasa"
-                        2 -> "Rabu"
-                        3 -> "Kamis"
-                        4 -> "Jumat"
-                        5 -> "Sabtu"
-                        else -> "Minggu"
+                val targetPlayEpisode = remember(detail.episodes, lastProgress) {
+                    lastProgress?.let { prog ->
+                        detail.episodes.find { it.link == prog.episodeUrl }
+                    } ?: detail.episodes.lastOrNull() ?: detail.episodes.firstOrNull()
+                }
+
+                val sortedEpisodes = remember(detail.episodes, sortDescending) {
+                    val indexed = detail.episodes.map { ep ->
+                        val epNum = Regex("""(?:episode|ep|eps)\s*(\d+)""", RegexOption.IGNORE_CASE)
+                            .find(ep.title)?.groupValues?.get(1)?.toIntOrNull()
+                        ep to epNum
+                    }
+                    if (indexed.all { it.second != null }) {
+                        if (sortDescending) indexed.sortedByDescending { it.second }.map { it.first }
+                        else indexed.sortedBy { it.second }.map { it.first }
+                    } else {
+                        if (sortDescending) detail.episodes else detail.episodes.reversed()
                     }
                 }
 
-                val sourceWork = when {
-                    detail.title.contains("Battle", ignoreCase = true) ||
-                    detail.title.contains("Throne", ignoreCase = true) ||
-                    detail.title.contains("Renegade", ignoreCase = true) ||
-                    detail.title.contains("Against", ignoreCase = true) -> "From Light Novel"
-                    else -> "Manga Edition"
+                val hasValidRating = remember(detail.rating) {
+                    val r = detail.rating.trim()
+                    r.isNotEmpty() && !r.equals("N/A", ignoreCase = true) && !r.equals("0", ignoreCase = true)
                 }
-
-                val studioName = when {
-                    detail.title.contains("Battle", ignoreCase = true) -> "Larks Films"
-                    detail.title.contains("Throne", ignoreCase = true) -> "Shenman Entertainment"
-                    detail.title.contains("Renegade", ignoreCase = true) -> "Sparkly Key"
-                    detail.title.contains("Slay", ignoreCase = true) -> "Sparkly Key"
-                    else -> detail.studio.ifEmpty { "MAPPA" }
-                }
-
-                val releaseSeason = when {
-                    detail.title.contains("Battle", ignoreCase = true) -> "Summer 2022"
-                    detail.title.contains("Throne", ignoreCase = true) -> "Spring 2022"
-                    else -> "Spring ${detail.released.ifEmpty { "2024" }}"
-                }
-
-                val viewsCountStr = "${(10 + titleHash % 150) / 10.0}M Views"
-                val viewsProgressStr = "${3 + titleHash % 5}:${10 + titleHash % 48} / 20:21"
-                val subscribersCountStr = "${(100 + titleHash % 800) / 10.0}K Subscriber"
-
-                // Use regex that specifically targets "Episode X" or "Ep X"
-                val epNumbers = detail.episodes.mapNotNull { ep ->
-                    val match = Regex("(?:episode|ep)\\s*(\\d+)", RegexOption.IGNORE_CASE).find(ep.title)
-                    match?.groupValues?.get(1)?.toIntOrNull() ?: 1
-                }
-                val latestEpNum = epNumbers.maxOrNull() ?: 1
-                val lanjutEpNum = if (latestEpNum > 1) latestEpNum - 1 else 1
-                val lanjutEpisode = detail.episodes.find { 
-                    it.title.contains(lanjutEpNum.toString()) 
-                } ?: detail.episodes.firstOrNull()
 
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
                         .verticalScroll(rememberScrollState())
                 ) {
-                    // Profile/Hero banner layout (Large-height character portrait focus)
+                    // Editorial Poster Backdrop Header
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(560.dp)
+                            .height(340.dp)
                     ) {
                         ResolveAnimeImage(
                             url = detail.posterUrl,
+                            contentDescription = detail.title,
                             modifier = Modifier.fillMaxSize(),
                             contentScale = ContentScale.Crop
                         )
+
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
                                 .background(
                                     Brush.verticalGradient(
-                                        colorStops = arrayOf(
-                                            0f to Color.Transparent,
-                                            0.5f to Color(0x990A0A0F),
-                                            0.85f to Color(0xEB0A0A0F),
-                                            1f to Color(0xFF0A0A0F)
-                                        )
+                                        0.0f to Color.Black.copy(alpha = 0.45f),
+                                        0.45f to MaterialTheme.colorScheme.background.copy(alpha = 0.72f),
+                                        1.0f to MaterialTheme.colorScheme.background
                                     )
                                 )
                         )
 
-                        Column(
+                        Row(
                             modifier = Modifier
-                                .fillMaxSize()
-                                .padding(horizontal = 20.dp, vertical = 20.dp),
-                            verticalArrangement = Arrangement.Bottom
+                                .align(Alignment.BottomStart)
+                                .fillMaxWidth()
+                                .padding(horizontal = 20.dp, vertical = 16.dp),
+                            verticalAlignment = Alignment.Bottom
                         ) {
-                            // Schedule Badge
-                            Row(
-                                modifier = Modifier.padding(bottom = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                            Box(
+                                modifier = Modifier
+                                    .width(116.dp)
+                                    .aspectRatio(0.68f)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceContainer)
+                                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(14.dp))
                             ) {
-                                Icon(
-                                    imageVector = Icons.Filled.DateRange,
-                                    contentDescription = "Schedule",
-                                    tint = Color(0xFFE50914),
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Setiap $scheduleDay",
-                                    color = Color(0xFFE50914),
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 16.sp
+                                ResolveAnimeImage(
+                                    url = detail.posterUrl,
+                                    contentDescription = detail.title,
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop
                                 )
                             }
 
-                            // Title
-                            Text(
-                                text = detail.title,
-                                color = Color.White,
-                                fontWeight = FontWeight.Black,
-                                fontSize = 32.sp,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                lineHeight = 38.sp
-                            )
+                            Spacer(modifier = Modifier.width(16.dp))
 
-                            // Alternative Title
-                            val cleanAlt = detail.title
-                            Text(
-                                text = cleanAlt,
-                                color = Color.White.copy(alpha = 0.7f),
-                                fontSize = 15.sp,
-                                modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
-                            )
-
-                            // Meta Chips
-                            FlowRow(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                // Rating Chip with custom border/background styling
-                                Box(
-                                    modifier = Modifier
-                                        .border(
-                                            width = 1.dp,
-                                            color = Color(0xFFFFC107).copy(alpha = 0.5f),
-                                            shape = RoundedCornerShape(50)
-                                        )
-                                        .background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(50))
-                                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(
-                                            imageVector = Icons.Filled.Star,
-                                            contentDescription = "Rating",
-                                            tint = Color(0xFFFFC107),
-                                            modifier = Modifier.size(13.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text(
-                                            text = detail.rating,
-                                            color = Color(0xFFFFC107),
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
+                                    MetaTagChip(
+                                        text = if (isDonghua) "3D DONGHUA" else "ANIME",
+                                        accent = true
+                                    )
+                                    if (hasValidRating) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(MaterialTheme.colorScheme.surfaceContainer)
+                                                .border(1.dp, AmberGold.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Filled.Star,
+                                                contentDescription = "Rating",
+                                                tint = AmberGold,
+                                                modifier = Modifier.size(13.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text(
+                                                text = detail.rating,
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = AmberGold
+                                            )
+                                        }
                                     }
                                 }
 
-                                val workType = if (selectedUrl.contains("anichin") || selectedUrl.contains("donghub")) "Donghua" else "Anime"
-                                MetaBorderChip(text = workType)
-                                MetaBorderChip(text = detail.status)
-                                MetaBorderChip(text = sourceWork)
-                                MetaBorderChip(text = releaseSeason)
-                                MetaBorderChip(text = "Release ${detail.released}")
-                                MetaBorderChip(text = "Confirm Eps ${detail.episodes.size}")
-                                MetaBorderChip(text = "Duration ${detail.duration}")
-                                MetaBorderChip(text = studioName)
+                                Spacer(modifier = Modifier.height(10.dp))
+
+                                Text(
+                                    text = detail.title,
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    color = MaterialTheme.colorScheme.onBackground,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+
+                                Spacer(modifier = Modifier.height(6.dp))
+
+                                Text(
+                                    text = listOfNotNull(
+                                        source.displayName,
+                                        detail.status.takeIf { it.isNotBlank() },
+                                        "${detail.episodes.size} Episode"
+                                    ).joinToString(" • "),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // Dynamic double actions
+                    // Primary Action Buttons
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 20.dp),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Column(
-                            modifier = Modifier.weight(1f),
-                            horizontalAlignment = Alignment.CenterHorizontally
+                        Button(
+                            onClick = {
+                                targetPlayEpisode?.let { viewModel.selectEpisode(it.link) }
+                            },
+                            enabled = targetPlayEpisode != null,
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                            modifier = Modifier
+                                .weight(1.35f)
+                                .defaultMinSize(minHeight = 50.dp)
+                                .testTag("detail_play_btn")
                         ) {
-                            Button(
-                                onClick = { 
-                                    if (lanjutEpisode != null) {
-                                        viewModel.selectEpisode(lanjutEpisode.link)
-                                    } else {
-                                        detail.episodes.firstOrNull()?.let { 
-                                            viewModel.selectEpisode(it.link)
-                                        }
-                                    }
-                                },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFF161622)
-                                ),
-                                contentPadding = PaddingValues(vertical = 12.dp),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(50)),
-                                shape = RoundedCornerShape(50)
-                            ) {
-                                Text(
-                                    text = "Lanjut",
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 15.sp
-                                )
+                            Icon(
+                                imageVector = Icons.Filled.PlayArrow,
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            val btnText = when {
+                                lastProgress != null && targetPlayEpisode != null ->
+                                    "Lanjut ${FormatUtils.formatEpisodeShort(targetPlayEpisode.title)}"
+                                targetPlayEpisode != null ->
+                                    "Tonton ${FormatUtils.formatEpisodeShort(targetPlayEpisode.title)}"
+                                else -> "Belum Tersedia"
                             }
-                            Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = "$viewsProgressStr · $viewsCountStr",
-                                color = Color.White.copy(alpha = 0.5f),
-                                fontSize = 11.sp,
-                                textAlign = TextAlign.Center
+                                text = btnText,
+                                style = MaterialTheme.typography.labelLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
 
-                        Column(
-                            modifier = Modifier.weight(1f),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Button(
-                                onClick = { 
-                                    viewModel.toggleBookmark(
-                                        ScrapedAnime(
-                                            title = detail.title,
-                                            link = selectedUrl,
-                                            imageUrl = detail.posterUrl,
-                                            status = detail.status,
-                                            score = detail.rating
-                                        )
+                        OutlinedButton(
+                            onClick = {
+                                viewModel.toggleBookmark(
+                                    ScrapedAnime(
+                                        title = detail.title,
+                                        link = selectedUrl,
+                                        imageUrl = detail.posterUrl,
+                                        status = detail.status,
+                                        score = detail.rating,
+                                        type = if (isDonghua) "Donghua" else "Anime"
                                     )
-                                },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = if (isSaved) Color.White else Color(0xFFE50914)
-                                ),
-                                contentPadding = PaddingValues(vertical = 12.dp),
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(50)
-                            ) {
-                                Text(
-                                    text = if (isSaved) "Unsubscribe" else "Subscribe",
-                                    color = if (isSaved) Color.Black else Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 15.sp
                                 )
-                            }
-                            Spacer(modifier = Modifier.height(8.dp))
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(
+                                1.dp,
+                                if (isSaved) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+                            ),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = if (isSaved) MaterialTheme.colorScheme.primaryContainer
+                                else MaterialTheme.colorScheme.surfaceContainer,
+                                contentColor = if (isSaved) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurface
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .defaultMinSize(minHeight = 50.dp)
+                                .testTag("detail_bookmark_btn")
+                        ) {
+                            Icon(
+                                imageVector = if (isSaved) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = subscribersCountStr,
-                                color = Color.White.copy(alpha = 0.5f),
-                                fontSize = 11.sp,
-                                textAlign = TextAlign.Center
+                                text = if (isSaved) "Tersimpan" else "Simpan",
+                                style = MaterialTheme.typography.labelLarge
                             )
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(20.dp))
+                    // Honest Metadata Row (strictly scraped fields)
+                    val realMetaItems = remember(detail) {
+                        listOfNotNull(
+                            detail.released.takeIf { it.isNotBlank() && it != "?" }?.let { "Rilis: $it" },
+                            detail.duration.takeIf { it.isNotBlank() && it != "?" }?.let { "Durasi: $it" },
+                            detail.studio.takeIf { it.isNotBlank() && it != "?" }?.let { "Studio: $it" }
+                        )
+                    }
+                    if (realMetaItems.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(16.dp))
+                        FlowRow(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 20.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            realMetaItems.forEach { chipText ->
+                                MetaTagChip(text = chipText)
+                            }
+                        }
+                    }
 
-                    // Horizontally scrollable genres
-                    LazyRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        contentPadding = PaddingValues(horizontal = 20.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(detail.genres, key = { it }) { genre ->
-                            Box(
-                                modifier = Modifier
-                                    .border(
-                                        width = 1.dp,
-                                        color = Color(0xFFE50914).copy(alpha = 0.7f),
-                                        shape = RoundedCornerShape(8.dp)
+                    // Clickable Genres
+                    if (detail.genres.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(16.dp))
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 20.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(detail.genres, key = { it }) { genre ->
+                                Box(
+                                    modifier = Modifier
+                                        .defaultMinSize(minHeight = 40.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(MaterialTheme.colorScheme.surfaceContainer)
+                                        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
+                                        .clickable {
+                                            viewModel.performSearch(genre, immediateSaveHistory = true)
+                                            viewModel.navigateTo(Screen.Search)
+                                        }
+                                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = genre,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.onSurface
                                     )
-                                    .background(Color(0xFF14141B), RoundedCornerShape(8.dp))
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                            ) {
-                                Text(
-                                    text = genre,
-                                    color = Color.White,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
+                                }
                             }
                         }
                     }
 
                     Spacer(modifier = Modifier.height(24.dp))
 
-                    // Synopsis Section
+                    // Synopsis
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -374,113 +372,163 @@ fun DetailScreen(viewModel: AnimeViewModel) {
                     ) {
                         Text(
                             text = "Sinopsis",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 22.sp
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onBackground
                         )
-                        Spacer(modifier = Modifier.height(10.dp))
+                        Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = detail.synopsis.ifEmpty { "Sinopsis tidak tersedia." },
-                            color = Color.White.copy(alpha = 0.8f),
-                            lineHeight = 22.sp,
-                            fontSize = 14.sp,
-                            textAlign = TextAlign.Justify
+                            text = detail.synopsis.ifBlank { "Sinopsis belum tersedia untuk judul ini." },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Start
                         )
                     }
 
                     Spacer(modifier = Modifier.height(24.dp))
 
-                    // Episodes Section
+                    // Episodes Header + Sort Toggle
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Daftar Episode (${detail.episodes.size})",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .defaultMinSize(minHeight = 48.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { sortDescending = !sortDescending }
+                                .padding(horizontal = 8.dp)
+                                .testTag("detail_sort_episodes")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.SwapVert,
+                                contentDescription = "Urutkan Episode",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = if (sortDescending) "Terbaru" else "Terlama",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 20.dp)
+                            .padding(horizontal = 20.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text(
-                            text = "Semua Episode (${detail.episodes.size})",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 20.sp
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        if (detail.episodes.isEmpty()) {
-                            Text("Tidak ada episode yang tersedia.", color = Color.Gray)
-                        } else {
-                            detail.episodes.forEach { episode ->
-                                Card(
+                        sortedEpisodes.forEach { episode ->
+                            val isLastWatched = lastProgress?.episodeUrl == episode.link
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isLastWatched) MaterialTheme.colorScheme.primaryContainer
+                                else MaterialTheme.colorScheme.surfaceContainer,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isLastWatched) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.outline
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .defaultMinSize(minHeight = 56.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { viewModel.selectEpisode(episode.link) }
+                            ) {
+                                Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(vertical = 6.dp)
-                                        .clickable { viewModel.selectEpisode(episode.link) },
-                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF14141D)),
-                                    shape = RoundedCornerShape(8.dp)
+                                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Row(
-                                        modifier = Modifier
-                                            .padding(16.dp)
-                                            .fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = FormatUtils.formatEpisodeTitle(episode.title),
-                                                color = Color.White,
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 15.sp,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            if (episode.date.isNotEmpty()) {
-                                                Spacer(modifier = Modifier.height(4.dp))
-                                                Text(
-                                                    text = episode.date,
-                                                    color = Color.Gray,
-                                                    fontSize = 12.sp
-                                                )
-                                            }
-                                        }
-                                        Icon(
-                                            imageVector = Icons.Filled.PlayArrow,
-                                            contentDescription = "Stream",
-                                            tint = Color(0xFFE50914),
-                                            modifier = Modifier.size(24.dp)
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = FormatUtils.formatEpisodeTitle(episode.title),
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
                                         )
+                                        val subtitle = listOfNotNull(
+                                            if (isLastWatched) "Terakhir ditonton" else null,
+                                            episode.date.takeIf { it.isNotBlank() }
+                                        ).joinToString(" • ")
+                                        if (subtitle.isNotBlank()) {
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = subtitle,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = if (isLastWatched) MaterialTheme.colorScheme.primary
+                                                else MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
                                     }
+
+                                    Icon(
+                                        imageVector = Icons.Filled.PlayArrow,
+                                        contentDescription = "Putar Episode",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(22.dp)
+                                    )
                                 }
                             }
                         }
                     }
-                    Spacer(modifier = Modifier.height(100.dp))
+
+                    Spacer(modifier = Modifier.height(32.dp))
                 }
             }
+
             is UiState.Error -> {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("Gagal memuat detail anime.", color = Color.White)
-                }
+                ErrorStateView(
+                    message = state.message,
+                    onRetry = { viewModel.retryAnimeDetail() },
+                    modifier = Modifier.align(Alignment.Center)
+                )
             }
+
             else -> {}
         }
 
-        // Beautiful back floating button overlaid
+        // Back button with 48dp accessible touch target
         IconButton(
             onClick = { viewModel.goBack() },
             modifier = Modifier
                 .statusBarsPadding()
-                .padding(16.dp)
-                .background(Color.Black.copy(alpha = 0.45f), CircleShape)
-                .size(42.dp)
+                .padding(12.dp)
+                .size(48.dp)
                 .align(Alignment.TopStart)
+                .testTag("detail_back_btn")
         ) {
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = "Kembali",
-                tint = Color.White
-            )
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.background.copy(alpha = 0.72f))
+                    .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Kembali",
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
         }
     }
 }

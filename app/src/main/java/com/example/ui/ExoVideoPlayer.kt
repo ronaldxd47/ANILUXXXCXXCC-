@@ -5,17 +5,19 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.os.BatteryManager
-import android.util.Log
 import android.view.ViewGroup
 import androidx.annotation.OptIn
-import androidx.compose.animation.*
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -30,20 +32,18 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.example.data.StreamEmbed
-import com.example.data.stream.ResolvedStream
-import com.example.data.stream.StreamResolver
+import com.example.playback.PlaybackController
 import com.example.ui.player.WebPlayerView
 import com.example.ui.player.controls.*
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 /**
- * Komponen Utama Video Player (Orchestrator).
- * Mengintegrasikan Media3 ExoPlayer (Hardware Accelerated), sandboxed WebView fallback,
- * adaptive stream routing, lifecycle management, serta kontrol UI modular.
+ * Komponen Utama Video Player (Thin Orchestrator).
+ * Seluruh resolusi stream, routing PlaybackRouter, dan error recovery dikendalikan oleh
+ * PlaybackController (bebas race-condition dengan Compose lifecycle dan bebas double-prepare).
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -53,117 +53,148 @@ fun ExoVideoPlayer(
     streamEmbeds: List<StreamEmbed>,
     currentEpisodeIndex: Int,
     totalEpisodes: Int,
+    hasPrevEpisode: Boolean = currentEpisodeIndex > 0,
+    hasNextEpisode: Boolean = currentEpisodeIndex in 0 until (totalEpisodes - 1),
+    nextEpisodeTitle: String? = null,
+    onPrevEpisode: () -> Unit = { if (currentEpisodeIndex > 0) Unit },
+    onNextEpisode: () -> Unit = {},
     onEpisodeChange: (Int) -> Unit,
     onBack: () -> Unit,
+    initialPositionMs: Long = 0L,
+    hardwareAccel: Boolean = true,
+    dataSaver: Boolean = false,
+    autoPlayNext: Boolean = true,
+    defaultQuality: String = "Auto",
+    onSaveProgress: (positionMs: Long, durationMs: Long) -> Unit = { _, _ -> },
+    onPlaybackEnded: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
 
-    // Status Engine: Native ExoPlayer vs Sandboxed Web Engine
-    var useNativeExo by remember(streamUrl) { mutableStateOf(true) }
-    var resolvedStreamState by remember(streamUrl) { mutableStateOf<ResolvedStream?>(null) }
-    var isResolving by remember(streamUrl) { mutableStateOf(true) }
-    var resolveErrorMessage by remember(streamUrl) { mutableStateOf<String?>(null) }
-    var hasPlaybackError by remember(streamUrl) { mutableStateOf(false) }
-    var playbackErrorMessage by remember(streamUrl) { mutableStateOf("") }
-
-    // Server aktif
     var currentServerName by remember(streamUrl) {
         val embed = streamEmbeds.find { it.iframeUrl == streamUrl }
         mutableStateOf(embed?.serverName ?: "Server Default")
     }
     var activeStreamUrl by remember(streamUrl) { mutableStateOf(streamUrl) }
 
-    // Session playback untuk menangani recovery terkoordinasi
-    var playbackSession by remember(activeStreamUrl, currentServerName) {
-        mutableStateOf(
-            PlaybackSession(
-                streamUrl = activeStreamUrl,
-                serverName = currentServerName,
-                activeEngine = PlaybackEngine.EXO
-            )
-        )
-    }
-
-    // Player Manager Singleton
     val playerManager = remember(context) { PlayerManager.getInstance(context) }
+    val controller = remember(context, playerManager) { PlaybackController(context, playerManager, scope) }
+    val controllerState by controller.state.collectAsState()
+    val availableQualities by playerManager.availableQualities.collectAsState()
+    val currentQuality by playerManager.currentQuality.collectAsState()
+
     var exoPlayer by remember { mutableStateOf<ExoPlayer?>(null) }
-
-    // Bind lifecycle ke PlayerManager
-    DisposableEffect(lifecycleOwner, playerManager) {
-        playerManager.attachLifecycle(lifecycleOwner)
-        onDispose {
-            playerManager.detachLifecycle()
-        }
-    }
-
-    // Ekstraksi dan resolusi kandidat stream
-    LaunchedEffect(activeStreamUrl, currentServerName) {
-        isResolving = true
-        resolveErrorMessage = null
-        hasPlaybackError = false
-        playbackErrorMessage = ""
-        useNativeExo = true
-
-        try {
-            val candidates = StreamResolver.resolveCandidates(context, activeStreamUrl, currentServerName)
-            val topCandidate = candidates.firstOrNull()
-            val resolved = topCandidate?.toResolvedStream()
-                ?: StreamResolver.resolve(context, activeStreamUrl, currentServerName)
-            resolvedStreamState = resolved
-            playbackSession = PlaybackSession(
-                streamUrl = activeStreamUrl,
-                serverName = currentServerName,
-                activeEngine = if (resolved.isDirect) PlaybackEngine.EXO else PlaybackEngine.WEBVIEW,
-                resolvedStream = resolved,
-                candidates = candidates,
-                currentCandidateIndex = 0
-            )
-            if (resolved.isDirect) {
-                useNativeExo = true
-            } else {
-                playbackSession = playbackSession.switchToWeb()
-                useNativeExo = false
-            }
-        } catch (e: Exception) {
-            Log.e("ExoVideoPlayer", "Stream resolution failed", e)
-            resolveErrorMessage = e.message
-            playbackSession = playbackSession.switchToWeb()
-            useNativeExo = false
-        } finally {
-            isResolving = false
-        }
-    }
-
-    // State Playback & UI
     var isPlayingState by remember { mutableStateOf(false) }
     var playbackState by remember { mutableStateOf(Player.STATE_IDLE) }
-    var currentPosition by remember { mutableStateOf(0L) }
-    var duration by remember { mutableStateOf(0L) }
+    var currentPosition by remember { mutableLongStateOf(0L) }
+    var duration by remember { mutableLongStateOf(0L) }
     var isBuffering by remember { mutableStateOf(false) }
 
-    // State Kontrol
     var showControls by remember { mutableStateOf(true) }
     var isLocked by remember { mutableStateOf(false) }
     var isSeeking by remember { mutableStateOf(false) }
     var controlsInteractionTrigger by remember { mutableLongStateOf(0L) }
     val resetControlsTimer: () -> Unit = { controlsInteractionTrigger = System.currentTimeMillis() }
-    var resizeMode by remember { mutableStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
-    var currentQuality by remember { mutableStateOf("Auto") }
-    var playbackSpeed by remember { mutableStateOf(1.0f) }
+    var resizeMode by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
+    var playbackSpeed by remember { mutableFloatStateOf(1.0f) }
     var isFullscreen by remember { mutableStateOf(false) }
 
-    // State Dialog
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showServerSelector by remember { mutableStateOf(false) }
 
-    // Double-Tap Seek Animation
     var doubleTapSeekSide by remember { mutableStateOf<String?>(null) }
     var doubleTapSeekAmount by remember { mutableIntStateOf(0) }
     var doubleTapAnimTrigger by remember { mutableLongStateOf(0L) }
-    var bandwidthSpeedText by remember { mutableStateOf("HD Auto") }
+    var bandwidthSpeedText by remember { mutableStateOf("Auto") }
+    var showNextCountdown by remember(streamUrl) { mutableStateOf(false) }
+    var nextCountdownSeconds by remember(streamUrl) { mutableIntStateOf(5) }
+
+    // Terapkan preferensi pemutaran pengguna (hardware accel, data saver, kualitas default)
+    LaunchedEffect(hardwareAccel, dataSaver, defaultQuality) {
+        playerManager.configureOptions(
+            hardwareAccel = hardwareAccel,
+            dataSaver = dataSaver,
+            defaultQuality = defaultQuality
+        )
+    }
+
+    // Lifecycle ExoPlayer tunggal selama player aktif (reuses codec across server switches)
+    DisposableEffect(lifecycleOwner, playerManager) {
+        playerManager.attachLifecycle(lifecycleOwner)
+
+        val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                isPlayingState = isPlaying
+                if (!isPlaying && currentPosition > 0L) {
+                    onSaveProgress(currentPosition, duration)
+                }
+            }
+
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                isPlayingState = playWhenReady && playbackState != Player.STATE_ENDED
+            }
+
+            override fun onPlaybackStateChanged(state: Int) {
+                playbackState = state
+                isBuffering = state == Player.STATE_BUFFERING
+                if (state == Player.STATE_READY) {
+                    exoPlayer?.let {
+                        duration = it.duration.coerceAtLeast(0L)
+                        currentPosition = it.currentPosition.coerceAtLeast(0L)
+                    }
+                } else if (state == Player.STATE_ENDED) {
+                    isPlayingState = false
+                    onSaveProgress(duration, duration)
+                    if (autoPlayNext && hasNextEpisode) {
+                        nextCountdownSeconds = 5
+                        showNextCountdown = true
+                    }
+                }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                val pos = exoPlayer?.currentPosition?.coerceAtLeast(0L) ?: currentPosition
+                controller.handlePlayerError(error, pos)
+            }
+        }
+
+        val instance = playerManager.initializePlayer(
+            refererUrl = streamUrl,
+            externalListener = listener
+        )
+        exoPlayer = instance
+
+        onDispose {
+            val lastPos = exoPlayer?.currentPosition?.coerceAtLeast(0L) ?: currentPosition
+            val lastDur = exoPlayer?.duration?.coerceAtLeast(0L) ?: duration
+            if (lastPos > 0L) {
+                onSaveProgress(lastPos, lastDur)
+            }
+            playerManager.detachLifecycle()
+            playerManager.releasePlayer()
+            exoPlayer = null
+        }
+    }
+
+    // Sinkronkan reference exoPlayer jika PlayerManager merebuild engine (mis. toggle Hardware Accel)
+    LaunchedEffect(playbackState, controllerState.resolvedStream) {
+        val currentInstance = playerManager.player
+        if (currentInstance != null && currentInstance !== exoPlayer) {
+            exoPlayer = currentInstance
+        }
+    }
+
+    // Trigger resolusi & prepare tunggal lewat PlaybackController (zero double-prepare)
+    LaunchedEffect(activeStreamUrl, currentServerName) {
+        val resumePos = if (activeStreamUrl == streamUrl) initialPositionMs else currentPosition
+        controller.startStream(
+            embedUrl = activeStreamUrl,
+            serverName = currentServerName,
+            resumePositionMs = resumePos
+        )
+    }
 
     LaunchedEffect(doubleTapAnimTrigger) {
         if (doubleTapAnimTrigger > 0L) {
@@ -173,7 +204,18 @@ fun ExoVideoPlayer(
         }
     }
 
-    // Fullscreen Status (Baterai & Jam)
+    LaunchedEffect(showNextCountdown) {
+        if (showNextCountdown) {
+            for (sec in 5 downTo 1) {
+                nextCountdownSeconds = sec
+                delay(1000)
+                if (!showNextCountdown) return@LaunchedEffect
+            }
+            showNextCountdown = false
+            onPlaybackEnded()
+        }
+    }
+
     var currentTimeString by remember { mutableStateOf("") }
     var batteryLevel by remember { mutableIntStateOf(-1) }
 
@@ -186,118 +228,6 @@ fun ExoVideoPlayer(
         }
     }
 
-    // Lifecycle listener ExoPlayer
-    DisposableEffect(activeStreamUrl, currentServerName, playerManager) {
-        val listener = object : Player.Listener {
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                isPlayingState = isPlaying
-            }
-            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-                isPlayingState = playWhenReady && playbackState != Player.STATE_ENDED
-            }
-            override fun onPlaybackStateChanged(state: Int) {
-                playbackState = state
-                isBuffering = state == Player.STATE_BUFFERING
-                if (state == Player.STATE_READY) {
-                    exoPlayer?.let { duration = it.duration }
-                    hasPlaybackError = false
-                }
-                if (state == Player.STATE_ENDED) {
-                    isPlayingState = false
-                }
-            }
-            override fun onPlayerError(error: PlaybackException) {
-                Log.w("ExoVideoPlayer", "Player error: [${error.errorCodeName}] ${error.message}")
-                val action = PlaybackErrorClassifier.classify(error, playbackSession)
-                when (action) {
-                    is PlaybackAction.NextCandidate -> {
-                        val safeCandUrl = PlayerManager.redactUrl(action.candidate.url)
-                        Log.i("ExoVideoPlayer", "Action NextCandidate: ${action.reason} -> $safeCandUrl")
-                        playbackSession = playbackSession.advanceToNextCandidate()
-                        val nextStream = action.candidate.toResolvedStream()
-                        resolvedStreamState = nextStream
-                        if (nextStream.isDirect) {
-                            useNativeExo = true
-                            playerManager.prepareCandidate(action.candidate, playWhenReady = true)
-                        } else {
-                            playbackSession = playbackSession.switchToWeb()
-                            useNativeExo = false
-                        }
-                    }
-                    is PlaybackAction.ReResolve -> {
-                        Log.i("ExoVideoPlayer", "Action ReResolve: ${action.reason}")
-                        scope.launch {
-                            isResolving = true
-                            try {
-                                val fresh = StreamResolver.resolve(context, activeStreamUrl, currentServerName)
-                                playbackSession = playbackSession.recordReResolve(fresh)
-                                resolvedStreamState = fresh
-                                if (fresh.isDirect) {
-                                    useNativeExo = true
-                                    playerManager.prepareStream(fresh, playWhenReady = true)
-                                } else {
-                                    playbackSession = playbackSession.switchToWeb()
-                                    useNativeExo = false
-                                }
-                            } catch (e: Exception) {
-                                Log.e("ExoVideoPlayer", "Re-resolve failed", e)
-                                playbackSession = playbackSession.switchToWeb()
-                                useNativeExo = false
-                            } finally {
-                                isResolving = false
-                            }
-                        }
-                    }
-                    is PlaybackAction.RetryExo -> {
-                        Log.i("ExoVideoPlayer", "Action RetryExo backoff ${action.delayMs}ms")
-                        playbackSession = playbackSession.recordExoAttempt()
-                        scope.launch {
-                            delay(action.delayMs)
-                            resolvedStreamState?.let { s ->
-                                playerManager.prepareStream(s, playWhenReady = true)
-                            }
-                        }
-                    }
-                    is PlaybackAction.FallbackToWeb -> {
-                        Log.i("ExoVideoPlayer", "Action FallbackToWeb: ${action.reason}")
-                        playbackSession = playbackSession.switchToWeb()
-                        hasPlaybackError = false
-                        playbackErrorMessage = ""
-                        useNativeExo = false
-                        playerManager.pause()
-                    }
-                    is PlaybackAction.FatalError -> {
-                        Log.e("ExoVideoPlayer", "Action FatalError: ${action.userFriendlyMessage}")
-                        hasPlaybackError = true
-                        playbackErrorMessage = action.userFriendlyMessage
-                    }
-                }
-            }
-        }
-
-        val instance = playerManager.initializePlayer(
-            refererUrl = activeStreamUrl,
-            externalListener = listener
-        )
-        exoPlayer = instance
-
-        onDispose {
-            playerManager.releasePlayer()
-            exoPlayer = null
-        }
-    }
-
-    // Effect saat stream ter-resolusi atau berubah
-    LaunchedEffect(resolvedStreamState, useNativeExo) {
-        val stream = resolvedStreamState
-        if (stream != null && stream.isDirect && useNativeExo) {
-            playerManager.prepareStream(stream)
-        } else if (!useNativeExo) {
-            playerManager.pause()
-        }
-    }
-
-    // Auto-hide controls
     LaunchedEffect(showControls, isPlayingState, isSeeking, controlsInteractionTrigger, isLocked) {
         if (showControls && isPlayingState && !isLocked && !isSeeking) {
             delay(3000)
@@ -305,69 +235,65 @@ fun ExoVideoPlayer(
         }
     }
 
-    // Polling posisi & bandwidth saat memutar
     LaunchedEffect(isPlayingState) {
+        var ticks = 0
         while (isPlayingState) {
             exoPlayer?.let { p ->
-                currentPosition = p.currentPosition
+                currentPosition = p.currentPosition.coerceAtLeast(0L)
                 duration = p.duration.coerceAtLeast(0L)
                 bandwidthSpeedText = playerManager.getFormattedBandwidthSpeed()
+                ticks++
+                if (ticks % 5 == 0 && currentPosition > 0L) {
+                    onSaveProgress(currentPosition, duration)
+                }
             }
             delay(1000)
         }
     }
 
-    // Konten Player Utama
     @Composable
     fun PlayerContent(
         fullScreenMode: Boolean,
         modifier: Modifier = Modifier
     ) {
+        val isWebMode = controllerState.activeEngine == PlaybackEngine.WEBVIEW ||
+            (controllerState.resolvedStream != null && !controllerState.resolvedStream!!.isDirect)
+
         Box(
             modifier = modifier
                 .fillMaxSize()
                 .background(Color.Black)
         ) {
-            if (!useNativeExo || (resolvedStreamState != null && !resolvedStreamState!!.isDirect)) {
-                // Web Engine Sandbox
-                val webUrl = resolvedStreamState?.originalIframeUrl?.takeIf { it.isNotBlank() && !it.contains(".m3u8") }
-                    ?: activeStreamUrl
+            if (isWebMode && !controllerState.isResolving) {
+                val stream = controllerState.resolvedStream
+                // Jika fallbackPreferIframe = false dan URL .m3u8 tersedia, biarkan WebPlayerView memakai HLS.js runtime
+                val webUrl = if (!controllerState.fallbackPreferIframe && stream?.url?.isNotBlank() == true) {
+                    stream.url
+                } else {
+                    stream?.originalIframeUrl?.takeIf { it.isNotBlank() && !it.contains(".m3u8", ignoreCase = true) }
+                        ?: activeStreamUrl
+                }
+
                 WebPlayerView(
                     url = webUrl,
                     title = title,
-                    headers = resolvedStreamState?.headers ?: emptyMap(),
-                    baseUrl = resolvedStreamState?.originalIframeUrl
-                        ?: resolvedStreamState?.headers?.get("Referer")
+                    headers = stream?.headers ?: emptyMap(),
+                    baseUrl = stream?.originalIframeUrl
+                        ?: stream?.headers?.get("Referer")
                         ?: activeStreamUrl,
                     onBack = onBack,
-                    onSwitchToExo = {
-                        scope.launch {
-                            isResolving = true
-                            try {
-                                val freshResolved = StreamResolver.resolve(context, activeStreamUrl, currentServerName)
-                                resolvedStreamState = freshResolved
-                                if (freshResolved.isDirect) {
-                                    useNativeExo = true
-                                }
-                            } catch (e: Exception) {
-                                Log.e("ExoVideoPlayer", "Manual re-resolve failed", e)
-                            } finally {
-                                isResolving = false
-                            }
-                        }
-                    },
+                    onSwitchToExo = { controller.switchToExoManual(currentPosition) },
                     onOpenServerSelector = { showServerSelector = true },
                     onToggleFullscreen = { isFullscreen = !isFullscreen },
                     isFullscreen = fullScreenMode
                 )
             } else {
-                // Native ExoPlayer Surface
                 AndroidView(
                     factory = { ctx ->
                         PlayerView(ctx).apply {
                             useController = false
                             this.resizeMode = resizeMode
-                            this.player = exoPlayer
+                            this.player = playerManager.player ?: exoPlayer
                             layoutParams = ViewGroup.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -376,21 +302,23 @@ fun ExoVideoPlayer(
                     },
                     update = { view ->
                         view.resizeMode = resizeMode
-                        if (view.player != exoPlayer) {
-                            view.player = exoPlayer
+                        val activeInstance = playerManager.player ?: exoPlayer
+                        if (view.player != activeInstance) {
+                            view.player = activeInstance
                         }
                     },
                     onReset = { view -> view.player = null },
                     onRelease = { view -> view.player = null },
                     modifier = Modifier
                         .fillMaxSize()
+                        .testTag("exo_player_surface")
                         .playerGestureHandler(
                             onTap = {
                                 showControls = !showControls
                                 if (showControls) resetControlsTimer()
                             },
                             onDoubleTapSeek = { isRight ->
-                                exoPlayer?.let { p ->
+                                (playerManager.player ?: exoPlayer)?.let { p ->
                                     val side = if (isRight) "right" else "left"
                                     if (doubleTapSeekSide == side) {
                                         doubleTapSeekAmount += 10
@@ -400,7 +328,8 @@ fun ExoVideoPlayer(
                                     }
                                     doubleTapAnimTrigger = System.currentTimeMillis()
                                     val delta = if (isRight) 10000L else -10000L
-                                    val newPos = (p.currentPosition + delta).coerceIn(0L, duration)
+                                    val maxDur = p.duration.coerceAtLeast(duration)
+                                    val newPos = (p.currentPosition + delta).coerceIn(0L, maxDur)
                                     p.seekTo(newPos)
                                     currentPosition = newPos
                                     showControls = true
@@ -410,67 +339,41 @@ fun ExoVideoPlayer(
                         )
                 )
 
-                // Indikator Resolving
-                if (isResolving) {
+                if (controllerState.isResolving) {
                     ResolvingOverlay()
                 }
 
-                // Indikator Buffering
-                if (isBuffering && !isResolving && !hasPlaybackError) {
+                if (isBuffering && !controllerState.isResolving && !controllerState.hasPlaybackError) {
                     BufferingOverlay()
                 }
 
-                // Overlay Error Playback
-                if (hasPlaybackError) {
+                if (controllerState.hasPlaybackError) {
                     PlaybackErrorOverlay(
-                        errorMessage = playbackErrorMessage,
-                        onRetry = {
-                            hasPlaybackError = false
-                            playbackSession = PlaybackSession(
-                                streamUrl = activeStreamUrl,
-                                serverName = currentServerName,
-                                activeEngine = PlaybackEngine.EXO,
-                                resolvedStream = resolvedStreamState
-                            )
-                            playerManager.retryPlayback(onReResolveRequired = {
-                                scope.launch {
-                                    isResolving = true
-                                    try {
-                                        val fresh = StreamResolver.resolve(context, activeStreamUrl, currentServerName)
-                                        playbackSession = playbackSession.recordReResolve(fresh)
-                                        resolvedStreamState = fresh
-                                        if (fresh.isDirect) {
-                                            useNativeExo = true
-                                            playerManager.prepareStream(fresh, playWhenReady = true)
-                                        } else {
-                                            playbackSession = playbackSession.switchToWeb()
-                                            useNativeExo = false
-                                        }
-                                    } catch (e: Exception) {
-                                        hasPlaybackError = true
-                                        playbackErrorMessage = "Gagal memuat ulang: ${e.message}"
-                                    } finally {
-                                        isResolving = false
-                                    }
-                                }
-                            })
-                        },
-                        onSwitchToWeb = {
-                            hasPlaybackError = false
-                            useNativeExo = false
-                        },
+                        errorMessage = controllerState.playbackErrorMessage,
+                        onRetry = { controller.retryManual(currentPosition) },
+                        onSwitchToWeb = { controller.switchToWebManual() },
                         onOpenServerSelector = { showServerSelector = true }
                     )
                 }
 
-                // Visual Feedback Double-Tap Seek
+                if (showNextCountdown) {
+                    AutoPlayCountdownOverlay(
+                        nextEpisodeTitle = nextEpisodeTitle.orEmpty(),
+                        secondsRemaining = nextCountdownSeconds,
+                        onPlayNow = {
+                            showNextCountdown = false
+                            onPlaybackEnded()
+                        },
+                        onCancel = { showNextCountdown = false }
+                    )
+                }
+
                 DoubleTapSeekFeedback(
                     seekSide = doubleTapSeekSide,
                     seekAmount = doubleTapSeekAmount,
                     isFullscreen = fullScreenMode
                 )
 
-                // Overlay Kontrol (Top Bar, Center Controls, Bottom Bar)
                 AnimatedVisibility(
                     visible = showControls,
                     enter = fadeIn(),
@@ -491,8 +394,12 @@ fun ExoVideoPlayer(
                         currentTimeString = currentTimeString,
                         currentEpisodeIndex = currentEpisodeIndex,
                         totalEpisodes = totalEpisodes,
+                        hasPrevEpisode = hasPrevEpisode,
+                        hasNextEpisode = hasNextEpisode,
+                        showSkipIntro = duration > 120_000L && currentPosition < 360_000L,
                         onPlayPauseToggle = {
-                            exoPlayer?.let {
+                            val activeInstance = playerManager.player ?: exoPlayer
+                            activeInstance?.let {
                                 if (it.isPlaying) {
                                     it.pause()
                                     isPlayingState = false
@@ -506,25 +413,48 @@ fun ExoVideoPlayer(
                         onSeek = { targetMs ->
                             isSeeking = true
                             currentPosition = targetMs
-                            exoPlayer?.seekTo(targetMs)
+                            (playerManager.player ?: exoPlayer)?.seekTo(targetMs)
                             isSeeking = false
                             resetControlsTimer()
                         },
                         onRewind10 = {
-                            val pos = exoPlayer?.currentPosition ?: 0L
-                            val target = (pos - 10000).coerceAtLeast(0)
-                            exoPlayer?.seekTo(target)
+                            val p = playerManager.player ?: exoPlayer
+                            val pos = p?.currentPosition ?: 0L
+                            val target = (pos - 10000).coerceAtLeast(0L)
+                            p?.seekTo(target)
                             currentPosition = target
                             resetControlsTimer()
                         },
                         onForward10 = {
-                            val pos = exoPlayer?.currentPosition ?: 0L
-                            val target = (pos + 10000).coerceAtMost(duration)
-                            exoPlayer?.seekTo(target)
+                            val p = playerManager.player ?: exoPlayer
+                            val pos = p?.currentPosition ?: 0L
+                            val maxDur = p?.duration?.coerceAtLeast(duration) ?: duration
+                            val target = (pos + 10000).coerceAtMost(maxDur)
+                            p?.seekTo(target)
                             currentPosition = target
                             resetControlsTimer()
                         },
+                        onSkipIntro = {
+                            val p = playerManager.player ?: exoPlayer
+                            val pos = p?.currentPosition ?: currentPosition
+                            val maxDur = p?.duration?.coerceAtLeast(duration) ?: duration
+                            val target = (pos + 85_000L).coerceAtMost(maxDur)
+                            p?.seekTo(target)
+                            currentPosition = target
+                            resetControlsTimer()
+                        },
+                        onPrevEpisode = {
+                            onSaveProgress(currentPosition, duration)
+                            onPrevEpisode()
+                            resetControlsTimer()
+                        },
+                        onNextEpisode = {
+                            onSaveProgress(currentPosition, duration)
+                            onNextEpisode()
+                            resetControlsTimer()
+                        },
                         onEpisodeChange = { newEpIndex ->
+                            onSaveProgress(currentPosition, duration)
                             onEpisodeChange(newEpIndex)
                             resetControlsTimer()
                         },
@@ -536,13 +466,13 @@ fun ExoVideoPlayer(
                                 2.0f -> 0.75f
                                 else -> 1.0f
                             }
-                            exoPlayer?.setPlaybackSpeed(playbackSpeed)
+                            playerManager.setPlaybackSpeed(playbackSpeed)
                             resetControlsTimer()
                         },
                         onLockToggle = { isLocked = !isLocked },
                         onSettingsClick = { showSettingsDialog = true },
                         onServerSelectorClick = { showServerSelector = true },
-                        onSwitchToWeb = { useNativeExo = false },
+                        onSwitchToWeb = { controller.switchToWebManual() },
                         onToggleAspectRatio = {
                             resizeMode = when (resizeMode) {
                                 AspectRatioFrameLayout.RESIZE_MODE_FIT -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
@@ -560,7 +490,6 @@ fun ExoVideoPlayer(
         }
     }
 
-    // Penanganan Dialog Fullscreen (Landscape Orientation & System Insets)
     if (isFullscreen) {
         Dialog(
             onDismissRequest = { isFullscreen = false },
@@ -573,15 +502,16 @@ fun ExoVideoPlayer(
             DisposableEffect(Unit) {
                 activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                 activity?.window?.let { win ->
-                    val controller = WindowCompat.getInsetsController(win, win.decorView)
-                    controller.hide(WindowInsetsCompat.Type.systemBars())
-                    controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    val controllerInsets = WindowCompat.getInsetsController(win, win.decorView)
+                    controllerInsets.hide(WindowInsetsCompat.Type.systemBars())
+                    controllerInsets.systemBarsBehavior =
+                        WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 }
                 onDispose {
                     activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
                     activity?.window?.let { win ->
-                        val controller = WindowCompat.getInsetsController(win, win.decorView)
-                        controller.show(WindowInsetsCompat.Type.systemBars())
+                        val controllerInsets = WindowCompat.getInsetsController(win, win.decorView)
+                        controllerInsets.show(WindowInsetsCompat.Type.systemBars())
                     }
                 }
             }
@@ -591,17 +521,16 @@ fun ExoVideoPlayer(
         PlayerContent(fullScreenMode = false, modifier = modifier)
     }
 
-    // Dialog Pengaturan Kecepatan & Kualitas
     if (showSettingsDialog) {
         PlayerSettingsDialog(
             playbackSpeed = playbackSpeed,
             currentQuality = currentQuality,
+            availableQualities = availableQualities,
             onSpeedSelected = { speed ->
                 playbackSpeed = speed
-                exoPlayer?.setPlaybackSpeed(speed)
+                playerManager.setPlaybackSpeed(speed)
             },
             onQualitySelected = { quality ->
-                currentQuality = quality
                 playerManager.setVideoQuality(quality)
                 showSettingsDialog = false
             },
@@ -609,7 +538,6 @@ fun ExoVideoPlayer(
         )
     }
 
-    // Dialog Pemilihan Server
     if (showServerSelector) {
         ServerSelectorDialog(
             streamEmbeds = streamEmbeds,

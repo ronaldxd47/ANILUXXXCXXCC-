@@ -27,6 +27,16 @@ data class QualityInfo(
 )
 
 /**
+ * Metadata track subtitle eksternal (.vtt, .srt, .ass) yang menyertai stream.
+ */
+data class SubtitleTrack(
+    val url: String,
+    val label: String = "Indonesia",
+    val language: String = "id",
+    val mimeType: String? = null
+)
+
+/**
  * Representasi multi-layer candidate stream.
  * Digunakan oleh Stream Intelligence Platform untuk candidate ranking,
  * playability scoring, dan fallback routing.
@@ -41,6 +51,7 @@ data class StreamCandidate(
     val audioCodec: CodecInfo? = null,
     val requestPolicy: RequestPolicy = RequestPolicy(),
     val quality: QualityInfo = QualityInfo(),
+    val subtitles: List<SubtitleTrack> = emptyList(),
     val score: Int = 0,
     val confidence: Float = 0.5f,
     val isDirectVideo: Boolean = false,
@@ -79,6 +90,7 @@ data class StreamCandidate(
             originalIframeUrl = originalPageUrl.ifEmpty { url },
             quality = quality.label,
             contentType = mimeType ?: container.defaultMime,
+            subtitles = subtitles,
             isValidated = isValidated
         )
     }
@@ -132,6 +144,7 @@ data class StreamCandidate(
                 mimeType = stream.contentType.ifEmpty { null },
                 requestPolicy = RequestPolicy.fromMap(stream.headers, stream.originalIframeUrl),
                 quality = QualityInfo(label = stream.quality),
+                subtitles = stream.subtitles,
                 isDirectVideo = stream.isDirect,
                 providerName = stream.serverName,
                 originalPageUrl = stream.originalIframeUrl,

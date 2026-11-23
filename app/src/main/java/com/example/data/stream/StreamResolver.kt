@@ -5,6 +5,8 @@ import android.net.Uri
 import android.util.Base64
 import android.util.Log
 import com.example.data.stream.detector.ProtocolDetector
+import com.example.data.stream.extractor.ExtractorUtils
+import com.example.data.stream.extractor.HosterExtractorRegistry
 import com.example.data.stream.model.ContainerFormat
 import com.example.data.stream.model.RequestPolicy
 import com.example.data.stream.model.StreamCandidate
@@ -14,10 +16,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.json.JSONObject
 import org.jsoup.Jsoup
 import java.util.concurrent.TimeUnit
-import java.util.regex.Pattern
 
 /**
  * Service Layer terpusat untuk Stream Resolution (Stream Intelligence Platform).
@@ -79,7 +79,7 @@ object StreamResolver {
                     cleanUrl = decoded
                 }
             } catch (e: Exception) {
-                Log.d(TAG, "Base64 decode skipped for: $cleanUrl")
+                Log.d(TAG, "Base64 decode skipped")
             }
         }
 
@@ -119,8 +119,10 @@ object StreamResolver {
                     candidates.add(candidate.copy(protocol = StreamProtocol.HLS, lastStatusCode = validated.lastStatusCode))
                 }
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Static stream parsing error for $cleanUrl: ${e.message}")
+            Log.w(TAG, "Static stream parsing error for ${com.example.data.BaseAnimestreamScraper.redactForLog(cleanUrl)}: ${e.message}")
         }
 
         // 4. Dynamic Headless Sniffing via WebView jika belum ada candidate HLS direct yang solid
@@ -137,6 +139,8 @@ object StreamResolver {
                         candidates.add(candidateWithProvider.copy(protocol = StreamProtocol.HLS, lastStatusCode = validated.lastStatusCode))
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.w(TAG, "Headless dynamic extraction error: ${e.message}")
             }
@@ -159,7 +163,8 @@ object StreamResolver {
 
         // 6. Ranking Candidates
         val ranked = CandidateRanker.rankCandidates(candidates)
-        Log.d(TAG, "Resolved ${ranked.size} candidates for $cleanUrl (top=${ranked.firstOrNull()?.url})")
+        val topRedacted = ranked.firstOrNull()?.url?.let { com.example.data.BaseAnimestreamScraper.redactForLog(it) }
+        Log.d(TAG, "Resolved ${ranked.size} candidates for ${com.example.data.BaseAnimestreamScraper.redactForLog(cleanUrl)} (top=$topRedacted)")
         return@withContext ranked
     }
 
@@ -199,113 +204,56 @@ object StreamResolver {
             }
 
             val html = response.body?.string() ?: return list
-            val doc = Jsoup.parse(html)
+            list.addAll(
+                HosterExtractorRegistry.extractAll(
+                    pageUrl = targetUrl,
+                    html = html,
+                    serverName = serverName,
+                    requestPolicy = requestPolicy
+                )
+            )
 
-            // A. HTML5 Video / Source tag
-            val videoEls = doc.select("video source, video")
-            for (videoEl in videoEls) {
-                val src = videoEl.attr("src").trim()
-                if (src.isNotEmpty() && !src.startsWith("blob:")) {
-                    val fullSrc = resolveAbsoluteUrl(targetUrl, src)
-                    if (fullSrc.startsWith("http")) {
-                        val protocol = ProtocolDetector.detect(fullSrc, videoEl.attr("type"), "")
-                        list.add(
-                            StreamCandidate(
-                                url = fullSrc,
-                                protocol = protocol,
-                                mimeType = videoEl.attr("type").ifEmpty { null },
-                                requestPolicy = requestPolicy,
-                                isDirectVideo = true,
-                                providerName = serverName,
-                                originalPageUrl = targetUrl
-                            )
-                        )
+            // 1-hop nested iframe unwrapping (when an embed page wraps another player iframe)
+            if (list.isEmpty()) {
+                val doc = Jsoup.parse(html, targetUrl)
+                val nestedIframe = doc.select("iframe[src], iframe[data-src]").firstOrNull { el ->
+                    val s = el.attr("src").ifEmpty { el.attr("data-src") }.lowercase()
+                    s.isNotBlank() && !s.contains("disqus") && !s.contains("ads") && !s.contains("doubleclick") && !s.contains("about:blank")
+                }
+                if (nestedIframe != null) {
+                    val nestedRaw = nestedIframe.attr("src").ifEmpty { nestedIframe.attr("data-src") }
+                    val nestedUrl = ExtractorUtils.resolveAbsoluteUrl(targetUrl, nestedRaw)
+                    if (nestedUrl.startsWith("http") && nestedUrl != targetUrl) {
+                        val nestedPolicy = RequestPolicy.fromMap(createStandardHeaders(nestedUrl), targetUrl)
+                        list.addAll(resolveStaticCandidatesDirect(nestedUrl, serverName, nestedPolicy))
                     }
                 }
-            }
-
-            // B. Blogger / Blogspot config
-            if (targetUrl.contains("blogger.com") || targetUrl.contains("blogspot.com") || html.contains("VIDEO_CONFIG")) {
-                val bloggerUrl = extractBloggerStream(html)
-                if (bloggerUrl.isNotEmpty()) {
-                    val fullBloggerUrl = resolveAbsoluteUrl(targetUrl, bloggerUrl)
-                    val protocol = ProtocolDetector.detect(fullBloggerUrl, "", "")
-                    list.add(
-                        StreamCandidate(
-                            url = fullBloggerUrl,
-                            protocol = protocol,
-                            requestPolicy = requestPolicy,
-                            isDirectVideo = true,
-                            providerName = serverName,
-                            originalPageUrl = targetUrl
-                        )
-                    )
-                }
-            }
-
-            // C. Unpack Dean Edwards JavaScript
-            val unpackedJs = unpackPackedJsIfAny(html)
-            val htmlToScan = if (unpackedJs.isNotEmpty()) "$html\n$unpackedJs" else html
-
-            // D. Regex matcher for absolute .m3u8, .mpd, or .mp4
-            val m3u8Regex = Regex("""(https?(?::|\\/\\/)[^"'<>\s]+?\.(?:m3u8|mp4|mpd|webm|mkv)(?:\?[^"'<>\s]*)?)""", RegexOption.IGNORE_CASE)
-            for (match in m3u8Regex.findAll(htmlToScan)) {
-                val found = resolveAbsoluteUrl(targetUrl, match.value)
-                if (!found.contains("googleads") && !found.contains("analytics") && !found.contains("doubleclick")) {
-                    val protocol = ProtocolDetector.detect(found, "", "")
-                    list.add(
-                        StreamCandidate(
-                            url = found,
-                            protocol = protocol,
-                            requestPolicy = requestPolicy,
-                            isDirectVideo = true,
-                            providerName = serverName,
-                            originalPageUrl = targetUrl
-                        )
-                    )
-                }
-            }
-
-            // E. Regex matcher for player sources: file/src/url
-            val fileRegex = Regex("""["']?(?:file|src|url)["']?\s*:\s*["']([^"']+\.(?:m3u8|mp4|mpd|webm)[^"']*)["']""", RegexOption.IGNORE_CASE)
-            for (match in fileRegex.findAll(htmlToScan)) {
-                val found = resolveAbsoluteUrl(targetUrl, match.groupValues[1])
-                val protocol = ProtocolDetector.detect(found, "", "")
-                list.add(
-                    StreamCandidate(
-                        url = found,
-                        protocol = protocol,
-                        requestPolicy = requestPolicy,
-                        isDirectVideo = true,
-                        providerName = serverName,
-                        originalPageUrl = targetUrl
-                    )
-                )
             }
         }
         return list
     }
 
-    private fun resolveAbsoluteUrl(baseUrl: String, candidate: String): String {
-        var clean = candidate.trim().replace("\\/", "/")
-        if (clean.startsWith("//")) return "https:$clean"
-        if (clean.startsWith("http://") || clean.startsWith("https://")) return clean
-
+    private fun resolveStaticCandidatesDirect(
+        targetUrl: String,
+        serverName: String,
+        requestPolicy: RequestPolicy
+    ): List<StreamCandidate> {
         return try {
-            val baseUri = java.net.URI(baseUrl)
-            baseUri.resolve(clean).toString()
-        } catch (e: Exception) {
-            try {
-                val uri = Uri.parse(baseUrl)
-                val origin = if (uri.scheme != null && uri.host != null) "${uri.scheme}://${uri.host}" else ""
-                if (clean.startsWith("/") && origin.isNotEmpty()) {
-                    "$origin$clean"
-                } else {
-                    clean
-                }
-            } catch (ex: Exception) {
-                clean
+            val request = Request.Builder()
+                .url(targetUrl)
+                .headers(okhttp3.Headers.headersOf(*requestPolicy.toSafeHeaderMap().flatMap { listOf(it.key, it.value) }.toTypedArray()))
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                val html = response.body?.string() ?: return emptyList()
+                HosterExtractorRegistry.extractAll(
+                    pageUrl = targetUrl,
+                    html = html,
+                    serverName = serverName,
+                    requestPolicy = requestPolicy
+                )
             }
+        } catch (_: Exception) {
+            emptyList()
         }
     }
 
@@ -333,74 +281,5 @@ object StreamResolver {
             "Origin" to domainOrigin,
             "Accept" to "*/*"
         )
-    }
-
-    private fun extractBloggerStream(html: String): String {
-        return try {
-            val jsonPattern = Pattern.compile("var\\s+VIDEO_CONFIG\\s*=\\s*(\\{.+?\\});", Pattern.DOTALL)
-            val matcher = jsonPattern.matcher(html)
-            if (matcher.find()) {
-                val jsonString = matcher.group(1) ?: return ""
-                val json = JSONObject(jsonString)
-                val streams = json.optJSONArray("streams")
-                if (streams != null && streams.length() > 0) {
-                    var bestUrl = ""
-                    var maxFormat = 0
-                    for (i in 0 until streams.length()) {
-                        val streamObj = streams.getJSONObject(i)
-                        val playUrl = streamObj.optString("play_url")
-                        val formatId = streamObj.optInt("format_id", 0)
-                        if (playUrl.isNotEmpty() && formatId >= maxFormat) {
-                            maxFormat = formatId
-                            bestUrl = playUrl
-                        }
-                    }
-                    if (bestUrl.isNotEmpty()) return bestUrl
-                }
-            }
-            ""
-        } catch (e: Exception) {
-            ""
-        }
-    }
-
-    private fun unpackPackedJsIfAny(html: String): String {
-        val packedPattern = Pattern.compile("eval\\(function\\(p,a,c,k,e,d\\).*?\\}\\('(.*?)'\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*'([^']+)'\\.split\\('\\|'\\)", Pattern.DOTALL)
-        val matcher = packedPattern.matcher(html)
-        val results = StringBuilder()
-
-        while (matcher.find()) {
-            try {
-                val p = matcher.group(1) ?: continue
-                val a = matcher.group(2)?.toIntOrNull() ?: 62
-                val c = matcher.group(3)?.toIntOrNull() ?: 0
-                val k = matcher.group(4)?.split("|") ?: continue
-
-                var unpacked = p
-                for (i in (k.size - 1) downTo 0) {
-                    val word = k[i]
-                    if (word.isNotEmpty()) {
-                        val token = toRadix(i, a)
-                        unpacked = unpacked.replace(Regex("\\b$token\\b"), word)
-                    }
-                }
-                results.append(unpacked).append("\n")
-            } catch (e: Exception) {
-                // Ignore
-            }
-        }
-        return results.toString()
-    }
-
-    private fun toRadix(num: Int, radix: Int): String {
-        val alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        if (num == 0) return "0"
-        var n = num
-        val sb = StringBuilder()
-        while (n > 0) {
-            sb.append(alphabet[n % radix])
-            n /= radix
-        }
-        return sb.reverse().toString()
     }
 }

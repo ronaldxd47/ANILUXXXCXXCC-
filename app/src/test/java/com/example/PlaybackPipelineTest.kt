@@ -262,5 +262,192 @@ class PlaybackPipelineTest {
         assertTrue("Expires should be masked", redacted.contains("expires=REDACTED"))
         assertTrue("Normal query params should remain", redacted.contains("id=42"))
     }
-}
 
+    @Test
+    fun `test playback router selects EXO for direct protocols and WEBVIEW for embeds`() {
+        val hlsCandidate = com.example.data.stream.model.StreamCandidate(
+            url = "https://cdn.example.com/master.m3u8",
+            protocol = com.example.data.stream.model.StreamProtocol.HLS,
+            isDirectVideo = true
+        )
+        val embedCandidate = com.example.data.stream.model.StreamCandidate(
+            url = "https://stream.example.com/embed/abc",
+            protocol = com.example.data.stream.model.StreamProtocol.WEB_EMBED,
+            isDirectVideo = false
+        )
+        assertEquals(
+            PlaybackEngine.EXO,
+            com.example.playback.router.PlaybackRouter.route(hlsCandidate)
+        )
+        assertEquals(
+            PlaybackEngine.WEBVIEW,
+            com.example.playback.router.PlaybackRouter.route(embedCandidate)
+        )
+
+        val resolvedIframe = ResolvedStream(
+            url = "https://stream.example.com/embed/abc",
+            mediaType = StreamMediaType.IFRAME
+        )
+        val resolvedProgressive = ResolvedStream(
+            url = "https://cdn.example.com/video.mp4",
+            mediaType = StreamMediaType.PROGRESSIVE,
+            protocol = com.example.data.stream.model.StreamProtocol.PROGRESSIVE
+        )
+        assertEquals(
+            PlaybackEngine.WEBVIEW,
+            com.example.playback.router.PlaybackRouter.route(resolvedIframe)
+        )
+        assertEquals(
+            PlaybackEngine.EXO,
+            com.example.playback.router.PlaybackRouter.route(resolvedProgressive)
+        )
+    }
+
+    @Test
+    fun `test anime source detects donghive samehadaku anichin and unknown urls`() {
+        assertEquals(
+            com.example.data.AnimeSource.ANICHIN,
+            com.example.data.AnimeSource.fromUrl("https://anichin.cafe/renegade-immortal")
+        )
+        assertEquals(
+            com.example.data.AnimeSource.DONGHUB,
+            com.example.data.AnimeSource.fromUrl("https://donghive.com/soul-land")
+        )
+        assertEquals(
+            com.example.data.AnimeSource.DONGHUB,
+            com.example.data.AnimeSource.fromUrl("https://donghub.org/btth")
+        )
+        assertEquals(
+            com.example.data.AnimeSource.SAMEHADAKU,
+            com.example.data.AnimeSource.fromUrl("https://samehadaku.email/one-piece")
+        )
+        assertEquals(
+            com.example.data.AnimeSource.UNKNOWN,
+            com.example.data.AnimeSource.fromUrl("https://example.org/other")
+        )
+    }
+
+    @Test
+    fun `test ttl memory cache reuses cached value and respects forceRefresh`() = kotlinx.coroutines.runBlocking {
+        val cache = com.example.data.cache.TtlMemoryCache<String, String>(defaultTtlMs = 60_000L)
+        var fetchCount = 0
+
+        val first = cache.getOrFetch("home") {
+            fetchCount++
+            "payload-1"
+        }
+        val second = cache.getOrFetch("home") {
+            fetchCount++
+            "payload-2"
+        }
+        assertEquals("payload-1", first)
+        assertEquals("payload-1", second)
+        assertEquals(1, fetchCount)
+
+        val refreshed = cache.getOrFetch("home", forceRefresh = true) {
+            fetchCount++
+            "payload-3"
+        }
+        assertEquals("payload-3", refreshed)
+        assertEquals(2, fetchCount)
+    }
+
+    @Test
+    fun `test blogger extractor sorts highest quality first and attaches subtitles`() {
+        val html = """
+            <html>
+              <script>
+                var VIDEO_CONFIG = {
+                  "streams": [
+                    {"format_id": 18, "play_url": "https://cdn.example.com/video_360.mp4"},
+                    {"format_id": 22, "play_url": "https://cdn.example.com/video_720.mp4"}
+                  ]
+                };
+              </script>
+              <video>
+                <track kind="subtitles" src="/subs/ep1_id.vtt" srclang="id" label="Indonesia" />
+              </video>
+            </html>
+        """.trimIndent()
+        val policy = com.example.data.stream.model.RequestPolicy(
+            referer = "https://www.blogger.com/video.g"
+        )
+        val extractor = com.example.data.stream.extractor.BloggerExtractor()
+        assertTrue(extractor.canHandle("https://www.blogger.com/video.g", html))
+
+        val candidates = extractor.extract(
+            pageUrl = "https://www.blogger.com/video.g",
+            html = html,
+            serverName = "Blogger 720p",
+            requestPolicy = policy
+        )
+        assertEquals(2, candidates.size)
+        assertEquals("720p", candidates[0].quality.label)
+        assertEquals("360p", candidates[1].quality.label)
+        assertEquals(1, candidates[0].subtitles.size)
+        assertEquals("https://www.blogger.com/subs/ep1_id.vtt", candidates[0].subtitles.first().url)
+        assertEquals("text/vtt", candidates[0].subtitles.first().mimeType)
+    }
+
+    @Test
+    fun `test packed hoster extractor unpacks obfuscated script and extracts hls stream`() {
+        // eval(function(p,a,c,k,e,d){...}('0://1.2/3.4',10,5,'https|cdn|streamwish|master|m3u8'.split('|'),0,{}))
+        val html = """
+            <script>
+            eval(function(p,a,c,k,e,d){return p}('0://1.2/3.4',10,5,'https|cdn|streamwish|master|m3u8'.split('|'),0,{}))
+            </script>
+        """.trimIndent()
+        val policy = com.example.data.stream.model.RequestPolicy(referer = "https://streamwish.to/e/abc")
+        val extractor = com.example.data.stream.extractor.PackedHosterExtractor()
+        assertTrue(extractor.canHandle("https://streamwish.to/e/abc", html))
+
+        val candidates = extractor.extract(
+            pageUrl = "https://streamwish.to/e/abc",
+            html = html,
+            serverName = "Streamwish",
+            requestPolicy = policy
+        )
+        assertTrue(candidates.any { it.url == "https://cdn.streamwish/master.m3u8" })
+        assertEquals(
+            com.example.data.stream.model.StreamProtocol.HLS,
+            candidates.first { it.url == "https://cdn.streamwish/master.m3u8" }.protocol
+        )
+    }
+
+    @Test
+    fun `test hoster registry extracts html5 media and preserves subtitle tracks across conversions`() {
+        val html = """
+            <html>
+              <body>
+                <video controls>
+                  <source src="/streams/episode10.mp4" type="video/mp4" />
+                  <track kind="subtitles" src="/subs/ep10_indo.srt" srclang="id" label="Indonesia" />
+                  <track kind="captions" src="https://cdn.example.com/subs/ep10_en.vtt" srclang="en" label="English" />
+                </video>
+              </body>
+            </html>
+        """.trimIndent()
+        val policy = com.example.data.stream.model.RequestPolicy(referer = "https://player.example.com/watch/10")
+
+        val candidates = com.example.data.stream.extractor.HosterExtractorRegistry.extractAll(
+            pageUrl = "https://player.example.com/watch/10",
+            html = html,
+            serverName = "Direct MP4",
+            requestPolicy = policy
+        )
+        assertEquals(1, candidates.size)
+        val candidate = candidates.first()
+        assertEquals("https://player.example.com/streams/episode10.mp4", candidate.url)
+        assertEquals(2, candidate.subtitles.size)
+        assertEquals("application/x-subrip", candidate.subtitles[0].mimeType)
+        assertEquals("text/vtt", candidate.subtitles[1].mimeType)
+
+        val resolved = candidate.toResolvedStream()
+        assertEquals(2, resolved.subtitles.size)
+        assertEquals("Indonesia", resolved.subtitles[0].label)
+
+        val restored = com.example.data.stream.model.StreamCandidate.fromResolvedStream(resolved)
+        assertEquals(2, restored.subtitles.size)
+        assertEquals("https://cdn.example.com/subs/ep10_en.vtt", restored.subtitles[1].url)
+    }
+}

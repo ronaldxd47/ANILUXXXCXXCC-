@@ -136,7 +136,7 @@ object StreamValidator {
                             ForbiddenReason.TOKEN_EXPIRED to "Akses ditolak atau token kedaluwarsa oleh CDN (HTTP $code)"
                     }
 
-                    Log.w(TAG, "Probe HTTP $code on stream: $url -> $reasonText")
+                    Log.w(TAG, "Probe HTTP $code on stream: ${com.example.data.BaseAnimestreamScraper.redactForLog(url)} -> $reasonText")
                     val res = ValidationResult.Invalid(
                         statusCode = code,
                         reason = reasonText,
@@ -148,7 +148,7 @@ object StreamValidator {
                 }
 
                 if (code == 404 || code == 410) {
-                    Log.w(TAG, "Probe HTTP $code on stream: $url (dead stream link)")
+                    Log.w(TAG, "Probe HTTP $code on stream: ${com.example.data.BaseAnimestreamScraper.redactForLog(url)} (dead stream link)")
                     val res = ValidationResult.Invalid(
                         statusCode = code,
                         reason = "Stream tidak ditemukan di server (HTTP $code)",
@@ -203,7 +203,7 @@ object StreamValidator {
                 if (bodySnippet.contains("<!DOCTYPE html", ignoreCase = true) ||
                     bodySnippet.contains("<html", ignoreCase = true)
                 ) {
-                    Log.w(TAG, "Candidate stream returned HTML web page instead of media: $url")
+                    Log.w(TAG, "Candidate stream returned HTML web page instead of media: ${com.example.data.BaseAnimestreamScraper.redactForLog(url)}")
                     val res = ValidationResult.Invalid(
                         statusCode = code,
                         reason = "Server mengembalikan halaman web HTML, bukan stream media",
@@ -244,8 +244,10 @@ object StreamValidator {
                 validationCache[url] = CacheEntry(res)
                 return@withContext res
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Stream probe error for $url: ${e.message}")
+            Log.w(TAG, "Stream probe error for ${com.example.data.BaseAnimestreamScraper.redactForLog(url)}: ${e.message}")
             // Fallback gracefully bila probe jaringan timeout tapi ekstensi URL jelas
             val lower = url.lowercase()
             val fallbackRes = when {

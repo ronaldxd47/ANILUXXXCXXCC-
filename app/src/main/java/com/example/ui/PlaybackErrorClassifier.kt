@@ -35,7 +35,7 @@ object PlaybackErrorClassifier {
         ) {
             val nextCand = session.nextCandidate
             return if (nextCand != null && nextCand.url.startsWith("https://")) {
-                Log.i(TAG, "Cleartext HTTP error, switching to HTTPS candidate: ${nextCand.url}")
+                Log.i(TAG, "Cleartext HTTP error, switching to HTTPS candidate: ${PlayerManager.redactUrl(nextCand.url)}")
                 PlaybackAction.NextCandidate(nextCand, "Mencoba sumber aman (HTTPS) alternatif...")
             } else if (session.canFallbackToWeb) {
                 Log.i(TAG, "Cleartext HTTP error detected: recommending Web Sandbox fallback")
@@ -48,7 +48,7 @@ object PlaybackErrorClassifier {
         if (httpCode == 404 || httpCode == 410) {
             val nextCand = session.nextCandidate
             return if (nextCand != null) {
-                Log.i(TAG, "HTTP $httpCode on active stream, trying next candidate: ${nextCand.url}")
+                Log.i(TAG, "HTTP $httpCode on active stream, trying next candidate: ${PlayerManager.redactUrl(nextCand.url)}")
                 PlaybackAction.NextCandidate(nextCand, "Sumber video tidak ditemukan ($httpCode). Mencoba sumber alternatif...")
             } else if (session.canFallbackToWeb) {
                 Log.i(TAG, "HTTP $httpCode detected, falling back to Web Sandbox embed")
@@ -59,10 +59,9 @@ object PlaybackErrorClassifier {
         }
 
         if (httpCode == 401 || httpCode == 403 || error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS) {
-            // Token expired atau CDN security block
             val nextCand = session.nextCandidate
             return if (nextCand != null) {
-                Log.i(TAG, "HTTP ${httpCode ?: 403} on active stream, trying next candidate: ${nextCand.url}")
+                Log.i(TAG, "HTTP ${httpCode ?: 403} on active stream, trying next candidate: ${PlayerManager.redactUrl(nextCand.url)}")
                 PlaybackAction.NextCandidate(nextCand, "Server menolak sumber utama, mencoba sumber alternatif...")
             } else if (session.canReResolve) {
                 Log.i(TAG, "HTTP ${httpCode ?: 403} detected: recommending Re-resolve for fresh token")
@@ -75,23 +74,30 @@ object PlaybackErrorClassifier {
             }
         }
 
-        if (httpCode == 429) {
+        if (httpCode == 429 || (httpCode != null && httpCode in 500..599)) {
             return if (session.canRetryExo) {
-                PlaybackAction.RetryExo(delayMs = 2500L)
+                PlaybackAction.RetryExo(delayMs = if (httpCode == 429) 2500L else 1200L)
+            } else if (session.nextCandidate != null) {
+                PlaybackAction.NextCandidate(session.nextCandidate!!, "Server sibuk (HTTP $httpCode), mencoba mirror lain...")
+            } else if (session.canFallbackToWeb) {
+                PlaybackAction.FallbackToWeb("Server CDN sibuk (HTTP $httpCode), mengalihkan ke pemutar web...")
             } else {
-                PlaybackAction.FatalError("Terlalu banyak permintaan ke server video. Mohon tunggu sesaat.")
+                PlaybackAction.FatalError("Server video sedang sibuk (HTTP $httpCode). Mohon coba lagi.")
             }
         }
 
-        // 2. Manifest & Parser Corrupted (Bukan HLS standar atau format asing)
+        // 2. Manifest & Container Corrupted / Unsupported
         if (error.errorCode == PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED ||
             error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED ||
+            error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED ||
+            error.errorCode == PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED ||
             causeMsg.contains("Cannot find sync byte", ignoreCase = true) ||
-            causeMsg.contains("Input does not start with the #EXTM3U", ignoreCase = true)
+            causeMsg.contains("Input does not start with the #EXTM3U", ignoreCase = true) ||
+            causeMsg.contains("None of the available extractors", ignoreCase = true)
         ) {
             val nextCand = session.nextCandidate
             return if (nextCand != null) {
-                Log.i(TAG, "Malformed manifest on active stream, trying next candidate: ${nextCand.url}")
+                Log.i(TAG, "Malformed/unsupported media on active stream, trying next candidate: ${PlayerManager.redactUrl(nextCand.url)}")
                 PlaybackAction.NextCandidate(nextCand, "Format tidak sesuai, mencoba sumber alternatif...")
             } else if (session.canFallbackToWeb) {
                 Log.i(TAG, "Malformed manifest or non-standard container: falling back to Web Sandbox")
@@ -101,7 +107,7 @@ object PlaybackErrorClassifier {
             }
         }
 
-        // 3. Decoder Failure (Emulator codec / format unhandled)
+        // 3. Decoder Failure
         if (error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
             error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED
         ) {
@@ -115,14 +121,21 @@ object PlaybackErrorClassifier {
             }
         }
 
-        // 4. Behind Live Window (Khusus live HLS stream yang tertinggal buffer)
-        if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
-            return PlaybackAction.RetryExo(delayMs = 500L)
+        // 4. Behind Live Window / Seek range error
+        if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW ||
+            error.errorCode == PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE
+        ) {
+            return if (session.canRetryExo) {
+                PlaybackAction.RetryExo(delayMs = 500L)
+            } else {
+                PlaybackAction.FallbackToWeb("Posisi buffer stream bergeser, mengalihkan ke pemutar web...")
+            }
         }
 
         // 5. Network Timeout / Connection Failed
         if (error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ||
-            error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
+            error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+            error.errorCode == PlaybackException.ERROR_CODE_IO_UNSPECIFIED
         ) {
             val nextCand = session.nextCandidate
             return if (session.canRetryExo) {

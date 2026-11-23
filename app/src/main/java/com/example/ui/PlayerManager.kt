@@ -12,10 +12,11 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.common.TrackSelectionParameters
+import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
@@ -30,28 +31,30 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Dedicated Singleton PlayerManager for managing the ExoPlayer instance.
- * Ensures a single active player across the application lifecycle,
- * preserves stream headers, implements real BandwidthMeter, Media3 Track Selection for quality,
- * and robust error classification.
+ * Dedicated Singleton PlayerManager untuk mengelola instance Media3 ExoPlayer.
+ * Menjamin single active player, meneruskan header stream granular ke MediaSource,
+ * menerapkan BandwidthMeter nyata, pemilihan track kualitas dinamis, opsi Data Saver / Hardware Accel,
+ * serta menyimpan/memulihkan posisi pemutaran.
  */
 @OptIn(UnstableApi::class)
 class PlayerManager private constructor(context: Context) {
 
     private val appContext: Context = context.applicationContext
 
-    // Internal active ExoPlayer instance
     private var exoPlayer: ExoPlayer? = null
     private var currentListener: Player.Listener? = null
+    private var externalPlayerListener: Player.Listener? = null
     private var currentLifecycleOwner: LifecycleOwner? = null
     private var lifecycleObserver: DefaultLifecycleObserver? = null
 
-    // Real Bandwidth Meter for live speed calculation
+    private var hardwareAccelEnabled: Boolean = true
+    private var dataSaverEnabled: Boolean = false
+    private var currentPlaybackSpeed: Float = 1.0f
+
     private val bandwidthMeter: DefaultBandwidthMeter by lazy {
         DefaultBandwidthMeter.Builder(appContext).build()
     }
 
-    // Reactive Player State Flows for Compose & UI observation
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
 
@@ -73,7 +76,9 @@ class PlayerManager private constructor(context: Context) {
     private val _currentQuality = MutableStateFlow("Auto")
     val currentQuality: StateFlow<String> = _currentQuality.asStateFlow()
 
-    // Current prepared stream
+    private val _availableQualities = MutableStateFlow(listOf("Auto", "1080p", "720p", "480p", "360p"))
+    val availableQualities: StateFlow<List<String>> = _availableQualities.asStateFlow()
+
     private var activeStream: ResolvedStream? = null
 
     val player: ExoPlayer?
@@ -82,7 +87,7 @@ class PlayerManager private constructor(context: Context) {
     companion object {
         private const val TAG = "PlayerManager"
         private const val DEFAULT_USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
         @Volatile
         private var INSTANCE: PlayerManager? = null
@@ -94,15 +99,12 @@ class PlayerManager private constructor(context: Context) {
         }
 
         fun redactUrl(url: String): String {
-            return url.replace(Regex("([?&](?:token|sig|signature|expires|auth|key)=)[^&]+", RegexOption.IGNORE_CASE)) {
-                "${it.groupValues[1]}REDACTED"
-            }
+            return url.replace(
+                Regex("([?&](?:token|sig|signature|expires|auth|key|tkn)=)[^&]+", RegexOption.IGNORE_CASE)
+            ) { "${it.groupValues[1]}REDACTED" }
         }
     }
 
-    /**
-     * Initializes player with referer URL string.
-     */
     fun initializePlayer(
         refererUrl: String,
         externalListener: Player.Listener? = null
@@ -110,52 +112,38 @@ class PlayerManager private constructor(context: Context) {
         val domainOrigin = try {
             val uri = Uri.parse(refererUrl)
             if (uri.scheme != null && uri.host != null) "${uri.scheme}://${uri.host}" else refererUrl
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             refererUrl
         }
-        val headers = mapOf(
-            "Referer" to refererUrl,
-            "Origin" to domainOrigin
+        return initializePlayer(
+            customHeaders = mapOf("Referer" to refererUrl, "Origin" to domainOrigin),
+            externalListener = externalListener
         )
-        return initializePlayer(headers, externalListener)
     }
 
-    /**
-     * Initializes or gets the existing ExoPlayer instance. Reuses player instance when possible
-     * to avoid heavy codec/audio hardware teardown across episode transitions.
-     */
     @Synchronized
     fun initializePlayer(
         customHeaders: Map<String, String> = emptyMap(),
-        externalListener: Player.Listener? = null
+        externalListener: Player.Listener? = null,
+        hardwareAccel: Boolean = hardwareAccelEnabled
     ): ExoPlayer {
-        // Reuse healthy player if already instantiated
+        val needsRebuildForAccel = exoPlayer != null && hardwareAccel != hardwareAccelEnabled
+        hardwareAccelEnabled = hardwareAccel
+
+        if (needsRebuildForAccel) {
+            releasePlayer()
+        }
+
+        externalPlayerListener = externalListener
+
         exoPlayer?.let { existing ->
             Log.d(TAG, "Reusing existing healthy ExoPlayer instance")
-            currentListener?.let { existing.removeListener(it) }
-            externalListener?.let { existing.addListener(it) }
-            currentListener = externalListener
             return existing
         }
 
-        Log.d(TAG, "Initializing fresh ExoPlayer instance...")
+        Log.d(TAG, "Initializing fresh ExoPlayer instance (hwAccel=$hardwareAccelEnabled)...")
 
-        // Build Default HTTP DataSource with sanitized stream headers
-        val safeHeaders = mutableMapOf<String, String>()
-        safeHeaders["Accept"] = "*/*"
-        customHeaders.forEach { (key, value) ->
-            val k = key.trim()
-            val v = value.trim()
-            if (k.isNotEmpty() && v.isNotEmpty() &&
-                !k.startsWith("Sec-Fetch-", ignoreCase = true) &&
-                !k.equals("Host", ignoreCase = true) &&
-                !k.equals("Content-Length", ignoreCase = true) &&
-                !k.equals("User-Agent", ignoreCase = true)
-            ) {
-                safeHeaders[k] = v
-            }
-        }
-
+        val safeHeaders = sanitizeHeaders(customHeaders)
         val userAgent = customHeaders["User-Agent"]?.takeIf { it.isNotBlank() } ?: DEFAULT_USER_AGENT
 
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
@@ -169,7 +157,6 @@ class PlayerManager private constructor(context: Context) {
         val mediaSourceFactory = DefaultMediaSourceFactory(appContext)
             .setDataSourceFactory(httpDataSourceFactory)
 
-        // Custom load control for fast buffering
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 15000, // minBufferMs
@@ -179,9 +166,12 @@ class PlayerManager private constructor(context: Context) {
             )
             .build()
 
-        // Step 3: Build ExoPlayer with decoder fallback for emulator compatibility
-        val renderersFactory = androidx.media3.exoplayer.DefaultRenderersFactory(appContext)
+        val renderersFactory = DefaultRenderersFactory(appContext)
             .setEnableDecoderFallback(true)
+            .setExtensionRendererMode(
+                if (hardwareAccelEnabled) DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
+                else DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF
+            )
 
         val newPlayer = ExoPlayer.Builder(appContext, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
@@ -200,16 +190,15 @@ class PlayerManager private constructor(context: Context) {
                 playWhenReady = true
             }
 
-        // Step 4: Register listener
         val internalListener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 _isPlaying.value = playing
-                externalListener?.onIsPlayingChanged(playing)
+                externalPlayerListener?.onIsPlayingChanged(playing)
             }
 
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
                 _isPlaying.value = playWhenReady && _playbackState.value != Player.STATE_ENDED
-                externalListener?.onPlayWhenReadyChanged(playWhenReady, reason)
+                externalPlayerListener?.onPlayWhenReadyChanged(playWhenReady, reason)
             }
 
             override fun onPlaybackStateChanged(state: Int) {
@@ -220,7 +209,34 @@ class PlayerManager private constructor(context: Context) {
                 } else if (state == Player.STATE_ENDED) {
                     _isPlaying.value = false
                 }
-                externalListener?.onPlaybackStateChanged(state)
+                externalPlayerListener?.onPlaybackStateChanged(state)
+            }
+
+            override fun onTracksChanged(tracks: Tracks) {
+                val detectedHeights = mutableSetOf<Int>()
+                for (group in tracks.groups) {
+                    if (group.type == C.TRACK_TYPE_VIDEO) {
+                        for (i in 0 until group.length) {
+                            val h = group.getTrackFormat(i).height
+                            if (h > 0) detectedHeights.add(h)
+                        }
+                    }
+                }
+                if (detectedHeights.isNotEmpty()) {
+                    val mapped = detectedHeights
+                        .sortedDescending()
+                        .map { h ->
+                            when {
+                                h >= 1000 -> "1080p"
+                                h >= 700 -> "720p"
+                                h >= 460 -> "480p"
+                                else -> "360p"
+                            }
+                        }
+                        .distinct()
+                    _availableQualities.value = listOf("Auto") + mapped
+                }
+                externalPlayerListener?.onTracksChanged(tracks)
             }
 
             override fun onPlayerError(error: PlaybackException) {
@@ -228,7 +244,7 @@ class PlayerManager private constructor(context: Context) {
                 _lastError.value = error
                 _isPlaying.value = false
                 _isBuffering.value = false
-                externalListener?.onPlayerError(error)
+                externalPlayerListener?.onPlayerError(error)
             }
         }
 
@@ -236,30 +252,60 @@ class PlayerManager private constructor(context: Context) {
         currentListener = internalListener
         exoPlayer = newPlayer
         _lastError.value = null
+        applyTrackConstraints()
 
         return newPlayer
     }
 
-    /**
-     * Prepares and starts playback of a [ResolvedStream] with dedicated stream-specific request headers
-     * applied directly to the MediaSource. This guarantees that master playlist, variant playlists,
-     * encryption keys, and video segments all receive the stream's custom Referer, Origin, Cookie, and User-Agent.
-     */
     @Synchronized
-    fun prepareStream(stream: ResolvedStream, playWhenReady: Boolean = true) {
+    fun configureOptions(
+        hardwareAccel: Boolean,
+        dataSaver: Boolean,
+        defaultQuality: String
+    ) {
+        val accelChanged = hardwareAccel != hardwareAccelEnabled
+        dataSaverEnabled = dataSaver
+        if (_currentQuality.value == "Auto" && defaultQuality.isNotBlank()) {
+            _currentQuality.value = normalizeQualityLabel(defaultQuality)
+        }
+        if (accelChanged && exoPlayer != null) {
+            val savedStream = activeStream
+            val savedPos = exoPlayer?.currentPosition ?: 0L
+            val wasPlaying = exoPlayer?.playWhenReady ?: true
+            val listener = externalPlayerListener
+            releasePlayer()
+            initializePlayer(emptyMap(), listener, hardwareAccel)
+            if (savedStream != null) {
+                prepareStream(savedStream, playWhenReady = wasPlaying, startPositionMs = savedPos)
+            }
+        } else {
+            hardwareAccelEnabled = hardwareAccel
+            applyTrackConstraints()
+        }
+    }
+
+    @Synchronized
+    fun prepareStream(
+        stream: ResolvedStream,
+        playWhenReady: Boolean = true,
+        startPositionMs: Long = 0L
+    ) {
         val p = exoPlayer ?: return
         activeStream = stream
+        _lastError.value = null
 
         try {
             val safeLogUrl = redactUrl(stream.url)
-            Log.d(TAG, "Preparing ResolvedStream with stream-specific headers: $safeLogUrl (type=${stream.mediaType}, container=${stream.container}, headers=${stream.headers.keys})")
+            Log.d(
+                TAG,
+                "Preparing ResolvedStream: $safeLogUrl (protocol=${stream.protocol}, container=${stream.container}, startMs=$startPositionMs)"
+            )
             p.stop()
             p.clearMediaItems()
 
             val uri = Uri.parse(stream.url)
             val mediaItemBuilder = MediaItem.Builder().setUri(uri)
 
-            val lower = stream.url.lowercase()
             val detectedProtocol = if (stream.protocol != StreamProtocol.UNKNOWN) {
                 stream.protocol
             } else when (stream.mediaType) {
@@ -269,52 +315,51 @@ class PlayerManager private constructor(context: Context) {
                 else -> ProtocolDetector.detect(stream.url, stream.contentType, "")
             }
 
+            val lower = stream.url.lowercase()
             val mimeType: String? = when (detectedProtocol) {
                 StreamProtocol.HLS -> MimeTypes.APPLICATION_M3U8
                 StreamProtocol.DASH -> MimeTypes.APPLICATION_MPD
                 StreamProtocol.SMOOTH_STREAMING -> "application/vnd.ms-sstr+xml"
                 StreamProtocol.RTSP -> "application/x-rtsp"
-                StreamProtocol.PROGRESSIVE -> {
-                    when (stream.container) {
-                        ContainerFormat.WEBM -> MimeTypes.VIDEO_WEBM
-                        ContainerFormat.MATROSKA -> MimeTypes.VIDEO_MATROSKA
-                        ContainerFormat.MPEG_TS -> MimeTypes.VIDEO_MP2T
-                        ContainerFormat.MP4, ContainerFormat.FMP4 -> MimeTypes.VIDEO_MP4
-                        ContainerFormat.FLV -> "video/x-flv"
-                        else -> {
-                            when {
-                                lower.contains(".webm") || stream.contentType.contains("webm", ignoreCase = true) -> MimeTypes.VIDEO_WEBM
-                                lower.contains(".mkv") || stream.contentType.contains("matroska", ignoreCase = true) -> MimeTypes.VIDEO_MATROSKA
-                                lower.contains(".ts") || stream.contentType.contains("mp2t", ignoreCase = true) -> MimeTypes.VIDEO_MP2T
-                                lower.endsWith(".mp4") || lower.contains(".mp4?") || stream.contentType.contains("mp4", ignoreCase = true) -> MimeTypes.VIDEO_MP4
-                                else -> null
-                            }
-                        }
+                StreamProtocol.PROGRESSIVE -> when (stream.container) {
+                    ContainerFormat.WEBM -> MimeTypes.VIDEO_WEBM
+                    ContainerFormat.MATROSKA -> MimeTypes.VIDEO_MATROSKA
+                    ContainerFormat.MPEG_TS -> MimeTypes.VIDEO_MP2T
+                    ContainerFormat.MP4, ContainerFormat.FMP4 -> MimeTypes.VIDEO_MP4
+                    ContainerFormat.FLV -> "video/x-flv"
+                    else -> when {
+                        lower.contains(".webm") || stream.contentType.contains("webm", ignoreCase = true) -> MimeTypes.VIDEO_WEBM
+                        lower.contains(".mkv") || stream.contentType.contains("matroska", ignoreCase = true) -> MimeTypes.VIDEO_MATROSKA
+                        lower.contains(".ts") || stream.contentType.contains("mp2t", ignoreCase = true) -> MimeTypes.VIDEO_MP2T
+                        lower.endsWith(".mp4") || lower.contains(".mp4?") || stream.contentType.contains("mp4", ignoreCase = true) -> MimeTypes.VIDEO_MP4
+                        else -> null
                     }
                 }
                 else -> null
             }
+
             if (mimeType != null) {
                 mediaItemBuilder.setMimeType(mimeType)
             }
+            if (stream.subtitles.isNotEmpty()) {
+                val subtitleConfigs = stream.subtitles.mapIndexed { idx, sub ->
+                    val subMime = sub.mimeType ?: when {
+                        sub.url.contains(".srt", ignoreCase = true) -> MimeTypes.APPLICATION_SUBRIP
+                        sub.url.contains(".ass", ignoreCase = true) || sub.url.contains(".ssa", ignoreCase = true) -> MimeTypes.TEXT_SSA
+                        else -> MimeTypes.TEXT_VTT
+                    }
+                    MediaItem.SubtitleConfiguration.Builder(Uri.parse(sub.url))
+                        .setMimeType(subMime)
+                        .setLanguage(sub.language)
+                        .setLabel(sub.label)
+                        .setSelectionFlags(if (idx == 0) C.SELECTION_FLAG_DEFAULT else 0)
+                        .build()
+                }
+                mediaItemBuilder.setSubtitleConfigurations(subtitleConfigs)
+            }
             val mediaItem = mediaItemBuilder.build()
 
-            // Build stream-specific HTTP DataSource Factory with headers
-            val safeHeaders = mutableMapOf<String, String>()
-            safeHeaders["Accept"] = "*/*"
-            stream.headers.forEach { (key, value) ->
-                val k = key.trim()
-                val v = value.trim()
-                if (k.isNotEmpty() && v.isNotEmpty() &&
-                    !k.startsWith("Sec-Fetch-", ignoreCase = true) &&
-                    !k.equals("Host", ignoreCase = true) &&
-                    !k.equals("Content-Length", ignoreCase = true) &&
-                    !k.equals("User-Agent", ignoreCase = true)
-                ) {
-                    safeHeaders[k] = v
-                }
-            }
-
+            val safeHeaders = sanitizeHeaders(stream.headers)
             val userAgent = stream.headers["User-Agent"]?.takeIf { it.isNotBlank() } ?: DEFAULT_USER_AGENT
 
             val streamHttpDataSourceFactory = DefaultHttpDataSource.Factory()
@@ -330,8 +375,10 @@ class PlayerManager private constructor(context: Context) {
 
             val mediaSource = mediaSourceFactory.createMediaSource(mediaItem)
 
-            p.setMediaSource(mediaSource)
+            p.setMediaSource(mediaSource, startPositionMs.coerceAtLeast(0L))
             p.prepare()
+            p.setPlaybackSpeed(currentPlaybackSpeed)
+            applyTrackConstraints()
             p.playWhenReady = playWhenReady
             if (playWhenReady) {
                 p.play()
@@ -341,85 +388,97 @@ class PlayerManager private constructor(context: Context) {
         }
     }
 
-    /**
-     * Mempersiapkan media langsung dari [StreamCandidate] dengan kebijakan header granular.
-     */
     @Synchronized
-    fun prepareCandidate(candidate: StreamCandidate, playWhenReady: Boolean = true) {
-        prepareStream(candidate.toResolvedStream(), playWhenReady)
+    fun prepareCandidate(
+        candidate: StreamCandidate,
+        playWhenReady: Boolean = true,
+        startPositionMs: Long = 0L
+    ) {
+        prepareStream(candidate.toResolvedStream(), playWhenReady, startPositionMs)
     }
 
-    /**
-     * Overload for raw URL string using intelligent ProtocolDetector instead of guessing MP4.
-     */
     fun prepareMedia(mediaUrl: String, playWhenReady: Boolean = true) {
         val protocol = ProtocolDetector.detect(mediaUrl, "", "")
         val mediaType = when (protocol) {
             StreamProtocol.HLS -> StreamMediaType.HLS
             StreamProtocol.DASH -> StreamMediaType.DASH
-            StreamProtocol.PROGRESSIVE -> StreamMediaType.MP4
+            StreamProtocol.PROGRESSIVE -> StreamMediaType.PROGRESSIVE
             else -> StreamMediaType.UNKNOWN
         }
         val stream = ResolvedStream(
             url = mediaUrl,
             mediaType = mediaType,
+            protocol = protocol,
             isDirectVideo = true
         )
         prepareStream(stream, playWhenReady)
     }
 
-    /**
-     * Changes video quality using real Media3 TrackSelectionParameters.
-     * Sets ceiling constraints without rigid min-size boundaries that could cause 0 track matches.
-     * Supports: "Auto", "1080p", "720p", "480p", "360p".
-     */
     fun setVideoQuality(quality: String) {
-        val p = exoPlayer ?: return
-        _currentQuality.value = quality
-
-        val builder = p.trackSelectionParameters.buildUpon()
-        builder.clearVideoSizeConstraints()
-
-        when (quality.lowercase()) {
-            "1080p" -> {
-                builder.setMaxVideoSize(1920, 1080)
-            }
-            "720p" -> {
-                builder.setMaxVideoSize(1280, 720)
-            }
-            "480p" -> {
-                builder.setMaxVideoSize(854, 480)
-            }
-            "360p" -> {
-                builder.setMaxVideoSize(640, 360)
-            }
-            else -> {
-                // Auto: Unconstrained adaptive bitrate
-            }
-        }
-
-        p.trackSelectionParameters = builder.build()
-        Log.d(TAG, "Applied video quality constraint: $quality")
+        _currentQuality.value = normalizeQualityLabel(quality)
+        applyTrackConstraints()
+        Log.d(TAG, "Applied video quality constraint: ${_currentQuality.value} (dataSaver=$dataSaverEnabled)")
     }
 
-    /**
-     * Gets real estimated bitrate in Mbps from DefaultBandwidthMeter.
-     */
+    private fun applyTrackConstraints() {
+        val p = exoPlayer ?: return
+        val builder = p.trackSelectionParameters.buildUpon()
+        builder.clearVideoSizeConstraints()
+        builder.setMaxVideoBitrate(Int.MAX_VALUE)
+
+        when (_currentQuality.value.lowercase()) {
+            "1080p" -> builder.setMaxVideoSize(1920, 1080)
+            "720p" -> builder.setMaxVideoSize(1280, 720)
+            "480p" -> builder.setMaxVideoSize(854, 480)
+            "360p" -> builder.setMaxVideoSize(640, 360)
+            else -> {
+                if (dataSaverEnabled) {
+                    builder.setMaxVideoSize(854, 480)
+                    builder.setMaxVideoBitrate(1_200_000)
+                }
+            }
+        }
+        p.trackSelectionParameters = builder.build()
+    }
+
+    private fun normalizeQualityLabel(raw: String): String = when {
+        raw.contains("1080") -> "1080p"
+        raw.contains("720") -> "720p"
+        raw.contains("480") -> "480p"
+        raw.contains("360") -> "360p"
+        else -> "Auto"
+    }
+
+    private fun sanitizeHeaders(customHeaders: Map<String, String>): MutableMap<String, String> {
+        val safeHeaders = mutableMapOf<String, String>()
+        safeHeaders["Accept"] = "*/*"
+        customHeaders.forEach { (key, value) ->
+            val k = key.trim()
+            val v = value.trim()
+            if (k.isNotEmpty() && v.isNotEmpty() &&
+                !k.startsWith("Sec-Fetch-", ignoreCase = true) &&
+                !k.equals("Host", ignoreCase = true) &&
+                !k.equals("Content-Length", ignoreCase = true) &&
+                !k.equals("User-Agent", ignoreCase = true)
+            ) {
+                safeHeaders[k] = v
+            }
+        }
+        return safeHeaders
+    }
+
     fun getEstimatedBitrateMbps(): Float {
         val bps = bandwidthMeter.bitrateEstimate
         if (bps <= 0L) return 0f
-        return (bps.toFloat() / 1_000_000f)
+        return bps.toFloat() / 1_000_000f
     }
 
-    /**
-     * Formats real bandwidth for UI display.
-     */
     fun getFormattedBandwidthSpeed(): String {
         val mbps = getEstimatedBitrateMbps()
         return if (mbps > 0.05f) {
             String.format(java.util.Locale.US, "%.1f Mbps", mbps)
         } else {
-            "HD Auto"
+            _currentQuality.value
         }
     }
 
@@ -427,12 +486,13 @@ class PlayerManager private constructor(context: Context) {
         val current = activeStream
         val lastErr = _lastError.value
         val isAuthError = lastErr?.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS
-        
+
         if (isAuthError && onReResolveRequired != null) {
             Log.i(TAG, "Auth error detected on retry: triggering fresh re-resolve...")
             onReResolveRequired()
         } else if (current != null) {
-            prepareStream(current, playWhenReady = true)
+            val pos = exoPlayer?.currentPosition ?: 0L
+            prepareStream(current, playWhenReady = true, startPositionMs = pos)
         } else {
             exoPlayer?.prepare()
             exoPlayer?.play()
@@ -441,11 +501,7 @@ class PlayerManager private constructor(context: Context) {
 
     fun togglePlayPause() {
         exoPlayer?.let { p ->
-            if (p.isPlaying) {
-                p.pause()
-            } else {
-                p.play()
-            }
+            if (p.isPlaying) p.pause() else p.play()
         }
     }
 
@@ -484,9 +540,10 @@ class PlayerManager private constructor(context: Context) {
     }
 
     fun setPlaybackSpeed(speed: Float) {
+        currentPlaybackSpeed = speed.coerceIn(0.25f, 2.0f)
         exoPlayer?.let { p ->
             try {
-                p.setPlaybackSpeed(speed.coerceIn(0.25f, 2.0f))
+                p.setPlaybackSpeed(currentPlaybackSpeed)
             } catch (e: Exception) {
                 Log.e(TAG, "Error setting playback speed: ${e.message}", e)
             }
@@ -505,12 +562,10 @@ class PlayerManager private constructor(context: Context) {
 
         val observer = object : DefaultLifecycleObserver {
             override fun onStop(owner: LifecycleOwner) {
-                // Pause playback when app or screen moves to background
                 pausePlayer()
             }
 
             override fun onDestroy(owner: LifecycleOwner) {
-                // Release player resources when screen lifecycle is completely destroyed
                 releasePlayer()
                 detachLifecycle()
             }
@@ -545,6 +600,7 @@ class PlayerManager private constructor(context: Context) {
                 Log.e(TAG, "Error releasing ExoPlayer: ${e.message}", e)
             } finally {
                 exoPlayer = null
+                activeStream = null
                 _isPlaying.value = false
                 _isBuffering.value = false
                 _playbackState.value = Player.STATE_IDLE

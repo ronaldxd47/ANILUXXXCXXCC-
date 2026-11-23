@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -14,9 +15,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.example.data.StreamEmbed
 
 /**
@@ -31,63 +32,80 @@ fun ServerSelectorDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismissRequest,
-        containerColor = Color(0xFF161822),
-        titleContentColor = Color.White,
-        textContentColor = Color.White,
+        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        titleContentColor = MaterialTheme.colorScheme.onSurface,
+        textContentColor = MaterialTheme.colorScheme.onSurface,
         shape = RoundedCornerShape(16.dp),
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     imageVector = Icons.Filled.Dns,
                     contentDescription = "Server",
-                    tint = Color(0xFFE50914)
+                    tint = MaterialTheme.colorScheme.primary
                 )
                 Spacer(modifier = Modifier.width(12.dp))
                 Text(
                     text = "Pilih Server Putar",
-                    fontSize = 18.sp,
+                    style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
             }
         },
         text = {
-            Box(modifier = Modifier.heightIn(max = 260.dp)) {
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+            Box(modifier = Modifier.heightIn(max = 280.dp)) {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(streamEmbeds.size) { index ->
                         val embed = streamEmbeds[index]
                         val isSelected = currentServerName == embed.serverName
-                        Box(
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(if (isSelected) Color(0xFFE50914) else Color(0xFF202330))
+                                .defaultMinSize(minHeight = 48.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(
+                                    if (isSelected) MaterialTheme.colorScheme.primaryContainer
+                                    else MaterialTheme.colorScheme.surfaceContainerHigh
+                                )
                                 .border(
                                     1.dp,
-                                    if (isSelected) Color(0xFFFF5252) else Color.Transparent,
-                                    RoundedCornerShape(8.dp)
+                                    if (isSelected) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.outline,
+                                    RoundedCornerShape(10.dp)
                                 )
                                 .clickable {
                                     onServerSelected(embed)
                                     onDismissRequest()
                                 }
                                 .padding(horizontal = 16.dp, vertical = 12.dp)
+                                .testTag("server_option_$index"),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
                                 text = embed.serverName,
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp
+                                color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurface,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
                             )
+                            if (isSelected) {
+                                Icon(
+                                    imageVector = Icons.Filled.Check,
+                                    contentDescription = "Dipilih",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
                         }
                     }
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismissRequest) {
-                Text("Tutup", color = Color.White)
+            TextButton(
+                onClick = onDismissRequest,
+                modifier = Modifier.defaultMinSize(minHeight = 48.dp)
+            ) {
+                Text("Tutup", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     )

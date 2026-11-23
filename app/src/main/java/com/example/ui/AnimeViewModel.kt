@@ -1,18 +1,18 @@
 package com.example.ui
 
 import android.app.Application
-import android.content.Context
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.*
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import org.json.JSONArray
+import kotlinx.coroutines.launch
 
 sealed interface UiState<out T> {
     object Idle : UiState<Nothing>
@@ -23,424 +23,409 @@ sealed interface UiState<out T> {
 
 class AnimeViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val sharedPrefs = application.getSharedPreferences("animestream_prefs", Context.MODE_PRIVATE)
+    companion object {
+        private const val TAG = "AnimeViewModel"
+        private const val AUTO_REFRESH_INTERVAL_MS = 300_000L
+    }
+
+    // Repository Abstractions (Clean Architecture — siap migrasi ke backend REST API)
+    private val db = AppDatabase.getDatabase(application)
+    private val libraryRepository: UserLibraryRepository = LocalUserLibraryRepository(db.savedAnimeDao())
+    private val scheduleRepository: ScheduleRepository = ScheduleRepository()
+    private val animeRepository: AnimeRepository = MultiSourceAnimeRepository(application)
+    private val preferencesRepository: PreferencesRepository = LocalPreferencesRepository(application)
 
     // Screen State
     private val _activeScreen = MutableStateFlow<Screen>(Screen.Home)
-    val activeScreen = _activeScreen.asStateFlow()
+    val activeScreen: StateFlow<Screen> = _activeScreen.asStateFlow()
 
-    // Home feed lists
+    // Home Feeds
     private val _latestUpdates = MutableStateFlow<UiState<List<ScrapedAnime>>>(UiState.Idle)
-    val latestUpdates = _latestUpdates.asStateFlow()
+    val latestUpdates: StateFlow<UiState<List<ScrapedAnime>>> = _latestUpdates.asStateFlow()
 
     private val _trendingAnime = MutableStateFlow<List<ScrapedAnime>>(emptyList())
-    val trendingAnime = _trendingAnime.asStateFlow()
+    val trendingAnime: StateFlow<List<ScrapedAnime>> = _trendingAnime.asStateFlow()
 
-    // Dynamic View Counts Tracking
-    private val _viewCounts = MutableStateFlow<Map<String, Int>>(emptyMap())
-    val viewCounts = _viewCounts.asStateFlow()
-
-    fun getViewCount(link: String): Int {
-        val current = _viewCounts.value[link]
-        if (current != null) return current
-        
-        // Seed based on link hash for natural starting values
-        val seed = kotlin.math.abs(link.hashCode() % 14500) + 1200
-        val stored = sharedPrefs.getInt("views_$link", seed)
-        
-        // Update in-memory map
-        val newMap = _viewCounts.value.toMutableMap()
-        newMap[link] = stored
-        _viewCounts.value = newMap
-        return stored
-    }
-
-    fun incrementViewCount(link: String) {
-        val current = getViewCount(link)
-        val newVal = current + 1
-        sharedPrefs.edit().putInt("views_$link", newVal).apply()
-        
-        val newMap = _viewCounts.value.toMutableMap()
-        newMap[link] = newVal
-        _viewCounts.value = newMap
-        
-        // Re-sort current trending list descending
-        val currentTrending = _trendingAnime.value
-        if (currentTrending.isNotEmpty()) {
-            _trendingAnime.value = currentTrending.sortedByDescending { getViewCount(it.link) }
-        }
-    }
-
-    fun formatViewCount(views: Int): String {
-        return if (views >= 1_000_000) {
-            "${views / 100_000 / 10.0}M views"
-        } else if (views >= 1_000) {
-            "${views / 100 / 10.0}K views"
-        } else {
-            "$views views"
-        }
-    }
-
-    // Search results State
+    // Search State
     private val _searchQuery = MutableStateFlow("")
-    val searchQuery = _searchQuery.asStateFlow()
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
     private val _searchResults = MutableStateFlow<UiState<List<ScrapedAnime>>>(UiState.Idle)
-    val searchResults = _searchResults.asStateFlow()
+    val searchResults: StateFlow<UiState<List<ScrapedAnime>>> = _searchResults.asStateFlow()
 
-    // Details of currently viewed anime
+    val recentSearches: StateFlow<List<String>> = preferencesRepository.recentSearches
+
+    // Detail & Episode State
     private val _selectedAnimeUrl = MutableStateFlow<String?>(null)
-    val selectedAnimeUrl = _selectedAnimeUrl.asStateFlow()
+    val selectedAnimeUrl: StateFlow<String?> = _selectedAnimeUrl.asStateFlow()
 
     private val _animeDetail = MutableStateFlow<UiState<AnimeDetail>>(UiState.Idle)
-    val animeDetail = _animeDetail.asStateFlow()
+    val animeDetail: StateFlow<UiState<AnimeDetail>> = _animeDetail.asStateFlow()
 
-    // Details of currently viewed episode
     private val _selectedEpisodeUrl = MutableStateFlow<String?>(null)
-    val selectedEpisodeUrl = _selectedEpisodeUrl.asStateFlow()
+    val selectedEpisodeUrl: StateFlow<String?> = _selectedEpisodeUrl.asStateFlow()
 
     private val _episodeDetail = MutableStateFlow<UiState<EpisodeDetail>>(UiState.Idle)
-    val episodeDetail = _episodeDetail.asStateFlow()
+    val episodeDetail: StateFlow<UiState<EpisodeDetail>> = _episodeDetail.asStateFlow()
 
-    private val db = AppDatabase.getDatabase(application)
-    private val repository = SavedAnimeRepository(db.savedAnimeDao())
-    private val scheduleRepository = ScheduleRepository()
-    private val animeRepository: AnimeRepository = MultiSourceAnimeRepository()
-
-    // Bookmark / Watchlist list
+    // Library (Bookmarks & History)
     private val _bookmarkedAnime = MutableStateFlow<List<ScrapedAnime>>(emptyList())
-    val bookmarkedAnime = _bookmarkedAnime.asStateFlow()
+    val bookmarkedAnime: StateFlow<List<ScrapedAnime>> = _bookmarkedAnime.asStateFlow()
 
-    // History list
     private val _historyAnime = MutableStateFlow<List<ScrapedAnime>>(emptyList())
-    val historyAnime = _historyAnime.asStateFlow()
+    val historyAnime: StateFlow<List<ScrapedAnime>> = _historyAnime.asStateFlow()
 
-    // Schedule list State (Real Scraped Data)
+    // Schedule State
     private val _scheduleState = MutableStateFlow<UiState<List<ScheduleDay>>>(UiState.Idle)
-    val scheduleState = _scheduleState.asStateFlow()
+    val scheduleState: StateFlow<UiState<List<ScheduleDay>>> = _scheduleState.asStateFlow()
 
-    // Navigation Stack for going back
+    // User Profile, Preferences & Cache
+    val userProfile: StateFlow<UserProfile> = preferencesRepository.userProfile
+    val playbackPreferences: StateFlow<PlaybackPreferences> = preferencesRepository.playbackPreferences
+
+    private val _cacheSize = MutableStateFlow("0 KB")
+    val cacheSize: StateFlow<String> = _cacheSize.asStateFlow()
+
     private val navigationStack = mutableListOf<Screen>()
+    private var refreshJob: Job? = null
+    private var searchJob: Job? = null
+    private var detailJob: Job? = null
+    private var episodeJob: Job? = null
 
     init {
-        com.example.data.SamehadakuScraper.appContext = application
-        loadBookmarksAndHistory()
-        fetchHomeFeed()
-        fetchScheduleData()
+        observeUserLibrary()
+        startPeriodicFeedSync()
+        fetchScheduleData(forceRefresh = false)
     }
 
-    /**
-     * Mengambil data jadwal rilis dari repository secara asynchronous (Coroutines).
-     * Siap migrasi ke backend / API di masa depan tanpa merusak UI.
-     */
-    fun fetchScheduleData() {
+    private fun observeUserLibrary() {
         viewModelScope.launch {
-            _scheduleState.value = UiState.Loading
-            try {
-                val data = scheduleRepository.getReleaseSchedule()
-                if (data.isNotEmpty()) {
-                    _scheduleState.value = UiState.Success(data)
-                } else {
-                    _scheduleState.value = UiState.Error("Gagal memuat jadwal rilis")
-                }
-            } catch (e: Exception) {
-                _scheduleState.value = UiState.Error(e.message ?: "Terjadi kesalahan")
+            launch {
+                libraryRepository.bookmarksFlow.collect { _bookmarkedAnime.value = it }
+            }
+            launch {
+                libraryRepository.historyFlow.collect { _historyAnime.value = it }
             }
         }
     }
 
-    // User Profile & Preferences State (Persisted in SharedPreferences)
-    private val _userName = MutableStateFlow(sharedPrefs.getString("profile_name", "Rey") ?: "Rey")
-    val userName = _userName.asStateFlow()
-
-    private val _userTitle = MutableStateFlow(sharedPrefs.getString("profile_title", "Otaku VIP Master") ?: "Otaku VIP Master")
-    val userTitle = _userTitle.asStateFlow()
-
-    private val _userEmail = MutableStateFlow(sharedPrefs.getString("profile_email", "rey.otaku@stream.id") ?: "rey.otaku@stream.id")
-    val userEmail = _userEmail.asStateFlow()
-
-    private val _userAvatarId = MutableStateFlow(sharedPrefs.getInt("profile_avatar_id", 0))
-    val userAvatarId = _userAvatarId.asStateFlow()
-
-    private val _preferredServer = MutableStateFlow(sharedPrefs.getString("pref_server", "Alpha Stream (Fast CDN)") ?: "Alpha Stream (Fast CDN)")
-    val preferredServer = _preferredServer.asStateFlow()
-
-    private val _downloadQuality = MutableStateFlow(sharedPrefs.getString("pref_quality", "720p HD") ?: "720p HD")
-    val downloadQuality = _downloadQuality.asStateFlow()
-
-    private val _autoPlayNext = MutableStateFlow(sharedPrefs.getBoolean("pref_autoplay", true))
-    val autoPlayNext = _autoPlayNext.asStateFlow()
-
-    private val _hardwareAccel = MutableStateFlow(sharedPrefs.getBoolean("pref_hardware_accel", true))
-    val hardwareAccel = _hardwareAccel.asStateFlow()
-
-    private val _notifyUpdates = MutableStateFlow(sharedPrefs.getBoolean("pref_notify", true))
-    val notifyUpdates = _notifyUpdates.asStateFlow()
-
-    private val _dataSaver = MutableStateFlow(sharedPrefs.getBoolean("pref_datasaver", false))
-    val dataSaver = _dataSaver.asStateFlow()
-
-    private val _subtitleStyle = MutableStateFlow(sharedPrefs.getString("pref_subtitle", "Kuning Anime (Shadow)") ?: "Kuning Anime (Shadow)")
-    val subtitleStyle = _subtitleStyle.asStateFlow()
-
-    private val _cacheSize = MutableStateFlow("0 MB")
-    val cacheSize = _cacheSize.asStateFlow()
-
-    fun updateProfile(name: String, title: String, email: String, avatarId: Int) {
-        _userName.value = name
-        _userTitle.value = title
-        _userEmail.value = email
-        _userAvatarId.value = avatarId
-        sharedPrefs.edit()
-            .putString("profile_name", name)
-            .putString("profile_title", title)
-            .putString("profile_email", email)
-            .putInt("profile_avatar_id", avatarId)
-            .apply()
-    }
-
-    fun setPreferredServer(server: String) {
-        _preferredServer.value = server
-        sharedPrefs.edit().putString("pref_server", server).apply()
-    }
-
-    fun setDownloadQuality(quality: String) {
-        _downloadQuality.value = quality
-        sharedPrefs.edit().putString("pref_quality", quality).apply()
-    }
-
-    fun setAutoPlayNext(enabled: Boolean) {
-        _autoPlayNext.value = enabled
-        sharedPrefs.edit().putBoolean("pref_autoplay", enabled).apply()
-    }
-
-    fun setHardwareAccel(enabled: Boolean) {
-        _hardwareAccel.value = enabled
-        sharedPrefs.edit().putBoolean("pref_hardware_accel", enabled).apply()
-    }
-
-    fun setNotifyUpdates(enabled: Boolean) {
-        _notifyUpdates.value = enabled
-        sharedPrefs.edit().putBoolean("pref_notify", enabled).apply()
-    }
-
-    fun setDataSaver(enabled: Boolean) {
-        _dataSaver.value = enabled
-        sharedPrefs.edit().putBoolean("pref_datasaver", enabled).apply()
-    }
-
-    fun setSubtitleStyle(style: String) {
-        _subtitleStyle.value = style
-        sharedPrefs.edit().putString("pref_subtitle", style).apply()
-    }
-
-    fun calculateCacheSize() {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val context = getApplication<Application>()
-                var totalBytes = 0L
-                context.cacheDir?.walkTopDown()?.forEach { file ->
-                    if (file.isFile) totalBytes += file.length()
-                }
-                context.externalCacheDir?.walkTopDown()?.forEach { file ->
-                    if (file.isFile) totalBytes += file.length()
-                }
-                val formatted = if (totalBytes > 1024 * 1024) {
-                    String.format(java.util.Locale.US, "%.1f MB", totalBytes / (1024.0 * 1024.0))
-                } else if (totalBytes > 1024) {
-                    "${totalBytes / 1024} KB"
-                } else {
-                    "${totalBytes} B"
-                }
-                _cacheSize.value = formatted
-            } catch (e: Exception) {
-                _cacheSize.value = "45.2 MB"
-            }
-        }
-    }
-
-    fun clearAppCache() {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val context = getApplication<Application>()
-                context.cacheDir?.deleteRecursively()
-                context.externalCacheDir?.deleteRecursively()
-                _cacheSize.value = "0 KB"
-            } catch (e: Exception) {
-                _cacheSize.value = "0 KB"
-            }
-        }
-    }
-
-    fun clearHistoryOnly() {
-        viewModelScope.launch {
-            repository.deleteAllHistory()
-        }
-    }
-
-    fun clearFavoritesOnly() {
-        viewModelScope.launch {
-            repository.deleteAll()
-        }
-    }
-
-    fun clearAllHistoryAndFavorites() {
-        viewModelScope.launch {
-            repository.deleteAll()
-            repository.deleteAllHistory()
-        }
-    }
-
-
-    /**
-     * Fetch Home Updates & populate some mockup sliders
-     */
-    fun fetchHomeFeed() {
+    private fun startPeriodicFeedSync() {
         viewModelScope.launch {
             while (isActive) {
-                refreshData()
-                // Auto update periodic (5 minutes) -> To prevent too many requests but still fulfill "auto update juga semua"
-                kotlinx.coroutines.delay(300_000) 
+                refreshData(forceRefresh = false)
+                delay(AUTO_REFRESH_INTERVAL_MS)
             }
         }
     }
 
-    fun refreshData() {
-        viewModelScope.launch {
+    fun refreshData(forceRefresh: Boolean = false) {
+        refreshJob?.cancel()
+        refreshJob = viewModelScope.launch {
             try {
-                if (_latestUpdates.value !is UiState.Success) {
-                    _latestUpdates.value = UiState.Loading
-                }
-
-                // PHASE 1: Fast initial load via AnimeRepository
-                val fastCombined = animeRepository.getLatestUpdates(9000L)
-
-                if (fastCombined.isNotEmpty()) {
-                    _latestUpdates.value = UiState.Success(fastCombined)
-                    _trendingAnime.value = fastCombined.take(15).sortedByDescending { getViewCount(it.link) }
-                }
-
-                // PHASE 2: Silent background extension for page 2
-                viewModelScope.launch(Dispatchers.IO) {
-                    try {
-                        val page2Combined = animeRepository.getPageUpdates(2, 12000L)
-                        val fullCombined = (fastCombined + page2Combined).distinctBy { it.link }
-                        if (fullCombined.isNotEmpty()) {
-                            _latestUpdates.value = UiState.Success(fullCombined)
-                            _trendingAnime.value = fullCombined.take(20).sortedByDescending { getViewCount(it.link) }
-                        }
-                    } catch (e: Exception) {
-                        android.util.Log.e("AnimeViewModel", "Background refresh error", e)
+                if (_latestUpdates.value !is UiState.Success || forceRefresh) {
+                    if (_latestUpdates.value !is UiState.Success) {
+                        _latestUpdates.value = UiState.Loading
                     }
                 }
 
-                if (fastCombined.isEmpty() && _latestUpdates.value !is UiState.Success) {
-                    _latestUpdates.value = UiState.Error("Failed to fetch fresh data")
+                val page1 = animeRepository.getLatestUpdates(
+                    phase1Timeout = 9000L,
+                    forceRefresh = forceRefresh
+                )
+                if (page1.isNotEmpty()) {
+                    _latestUpdates.value = UiState.Success(page1)
+                    _trendingAnime.value = buildSpotlightList(page1)
                 }
+
+                // Background extension page 2
+                val page2 = animeRepository.getPageUpdates(
+                    page = 2,
+                    timeout = 12000L,
+                    forceRefresh = forceRefresh
+                )
+                val combined = (page1 + page2).distinctBy { it.link }
+                if (combined.isNotEmpty()) {
+                    _latestUpdates.value = UiState.Success(combined)
+                    _trendingAnime.value = buildSpotlightList(combined)
+                } else if (_latestUpdates.value !is UiState.Success) {
+                    _latestUpdates.value = UiState.Error("Gagal memuat rilis terbaru. Periksa koneksi internet.")
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
-                android.util.Log.e("AnimeViewModel", "Repository error", e)
+                Log.e(TAG, "refreshData error: ${e.message}")
+                if (_latestUpdates.value !is UiState.Success) {
+                    _latestUpdates.value = UiState.Error(e.message ?: "Gagal memuat data")
+                }
             }
         }
     }
 
-    private var searchJob: kotlinx.coroutines.Job? = null
-
     /**
-     * Search anime (Debounced) via AnimeRepository
+     * Menyusun daftar sorotan editorial berdasarkan skor nyata (jika tersedia)
+     * dan variasi sumber (Anime JP & Donghua), tanpa data fiktif.
      */
-    fun performSearch(query: String) {
+    private fun buildSpotlightList(items: List<ScrapedAnime>): List<ScrapedAnime> {
+        return items
+            .sortedWith(
+                compareByDescending<ScrapedAnime> { item ->
+                    item.score.toFloatOrNull() ?: 0f
+                }
+            )
+            .take(12)
+    }
+
+    fun fetchScheduleData(forceRefresh: Boolean = false) {
+        viewModelScope.launch {
+            if (_scheduleState.value !is UiState.Success || forceRefresh) {
+                _scheduleState.value = UiState.Loading
+            }
+            try {
+                val data = scheduleRepository.getReleaseSchedule(forceRefresh = forceRefresh)
+                if (data.isNotEmpty()) {
+                    _scheduleState.value = UiState.Success(data)
+                } else if (_scheduleState.value !is UiState.Success) {
+                    _scheduleState.value = UiState.Error("Jadwal rilis belum tersedia")
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "fetchScheduleData error: ${e.message}")
+                _scheduleState.value = UiState.Error(e.message ?: "Gagal memuat jadwal rilis")
+            }
+        }
+    }
+
+    fun performSearch(query: String, immediateSaveHistory: Boolean = false) {
         _searchQuery.value = query
         searchJob?.cancel()
-        
-        if (query.trim().isEmpty()) {
+
+        val clean = query.trim()
+        if (clean.isEmpty()) {
             _searchResults.value = UiState.Idle
             return
         }
-        
+
+        if (immediateSaveHistory) {
+            preferencesRepository.addSearchHistory(clean)
+        }
+
         searchJob = viewModelScope.launch {
-            kotlinx.coroutines.delay(400) // Debounce delay
+            if (!immediateSaveHistory) {
+                delay(380)
+            }
             _searchResults.value = UiState.Loading
-            
-            val combinedResults = animeRepository.searchAnime(query, 6000L)
-            
-            if (combinedResults.isNotEmpty()) {
-                _searchResults.value = UiState.Success(combinedResults)
+            val results = animeRepository.searchAnime(clean, timeout = 7000L)
+            if (results.isNotEmpty()) {
+                _searchResults.value = UiState.Success(results)
+                if (clean.length >= 3) {
+                    preferencesRepository.addSearchHistory(clean)
+                }
             } else {
-                _searchResults.value = UiState.Error("No results found.")
+                _searchResults.value = UiState.Error("Tidak ada hasil untuk \"$clean\"")
             }
         }
     }
 
-    /**
-     * Show Anime detailed screen via AnimeRepository
-     */
+    fun clearSearchHistory() {
+        preferencesRepository.clearSearchHistory()
+    }
+
     fun selectAnime(url: String) {
-        if (url.contains("myanimelist.net")) {
-            // Find the title matching this URL from the schedule state to perform a search
+        if (AnimeSource.fromUrl(url) == AnimeSource.MAL) {
             val scheduleLists = (_scheduleState.value as? UiState.Success)?.data ?: emptyList()
-            var searchTitle = ""
-            for (day in scheduleLists) {
-                val match = day.animeList.find { it.link == url }
-                if (match != null) {
-                    searchTitle = match.title
-                    break
-                }
-            }
-            if (searchTitle.isNotEmpty()) {
-                performSearch(searchTitle)
+            val matchTitle = scheduleLists.asSequence()
+                .flatMap { it.animeList.asSequence() }
+                .firstOrNull { it.link == url }
+                ?.title
+                .orEmpty()
+
+            if (matchTitle.isNotEmpty()) {
+                performSearch(matchTitle, immediateSaveHistory = true)
                 navigateTo(Screen.Search)
             }
             return
         }
 
-        incrementViewCount(url)
         _selectedAnimeUrl.value = url
         navigateTo(Screen.Detail)
 
-        viewModelScope.launch {
+        detailJob?.cancel()
+        detailJob = viewModelScope.launch {
             _animeDetail.value = UiState.Loading
-            val details = animeRepository.getAnimeDetail(url, 20000L)
+            val details = animeRepository.getAnimeDetail(url, timeout = 20000L)
             if (details != null && details.title.isNotEmpty() && details.title != "Title Missing") {
                 val finalDetails = if (details.episodes.isEmpty()) {
-                    // Fallback episode if details is a movie or direct episode link
                     details.copy(episodes = listOf(EpisodeItem(title = "Putar Episode Ini", link = url)))
                 } else {
                     details
                 }
                 _animeDetail.value = UiState.Success(finalDetails)
-                repository.insertHistory(HistoryAnime(link = url, title = finalDetails.title, imageUrl = finalDetails.posterUrl))
+                libraryRepository.recordHistory(
+                    link = url,
+                    title = finalDetails.title,
+                    imageUrl = finalDetails.posterUrl
+                )
             } else {
-                _animeDetail.value = UiState.Error("Gagal memuat detail anime untuk: $url. Silakan periksa koneksi atau coba lagi.")
+                _animeDetail.value = UiState.Error("Gagal memuat detail judul ini. Periksa koneksi lalu coba lagi.")
             }
         }
     }
 
-    /**
-     * Show Episode streaming or downloading options via AnimeRepository
-     */
+    fun retryAnimeDetail() {
+        _selectedAnimeUrl.value?.let { selectAnime(it) }
+    }
+
     fun selectEpisode(url: String) {
         _selectedEpisodeUrl.value = url
         navigateTo(Screen.Episode)
 
-        viewModelScope.launch {
+        episodeJob?.cancel()
+        episodeJob = viewModelScope.launch {
             _episodeDetail.value = UiState.Loading
-            val episodeDetails = animeRepository.getEpisodeDetail(url, 20000L)
+            val episodeDetails = animeRepository.getEpisodeDetail(url, timeout = 20000L)
             if (episodeDetails != null && (episodeDetails.streamEmbeds.isNotEmpty() || episodeDetails.downloads.isNotEmpty())) {
                 _episodeDetail.value = UiState.Success(episodeDetails)
             } else {
-                _episodeDetail.value = UiState.Error("Server video sedang dipersiapkan atau belum tersedia. Silakan pilih server alternatif atau refresh.")
+                _episodeDetail.value = UiState.Error("Server video belum tersedia atau timeout. Silakan coba muat ulang.")
             }
         }
     }
 
-    /**
-     * Switch Screens with simple custom stack
-     */
-    fun navigateTo(screen: Screen) {
-        if (_activeScreen.value != screen) {
-            navigationStack.add(_activeScreen.value)
-            _activeScreen.value = screen
+    fun retryEpisodeDetail() {
+        _selectedEpisodeUrl.value?.let { selectEpisode(it) }
+    }
+
+    // Watch Progress Tracking
+    fun saveEpisodeProgress(
+        episodeUrl: String,
+        episodeTitle: String,
+        positionMs: Long,
+        durationMs: Long
+    ) {
+        val animeUrl = _selectedAnimeUrl.value.orEmpty()
+        preferencesRepository.saveEpisodeProgress(
+            animeUrl = animeUrl,
+            progress = EpisodeProgress(
+                episodeUrl = episodeUrl,
+                episodeTitle = episodeTitle,
+                positionMs = positionMs,
+                durationMs = durationMs
+            )
+        )
+    }
+
+    fun getLastEpisodeProgress(animeUrl: String): EpisodeProgress? =
+        preferencesRepository.getLastEpisodeProgress(animeUrl)
+
+    fun getPlaybackPosition(episodeUrl: String): Long =
+        preferencesRepository.getPlaybackPosition(episodeUrl)
+
+    // Library Actions
+    fun toggleBookmark(anime: ScrapedAnime) {
+        viewModelScope.launch {
+            if (isBookmarked(anime.link)) {
+                libraryRepository.removeBookmark(anime.link)
+            } else {
+                libraryRepository.saveBookmark(anime)
+            }
         }
+    }
+
+    fun removeBookmark(link: String) {
+        viewModelScope.launch { libraryRepository.removeBookmark(link) }
+    }
+
+    fun removeHistoryItem(link: String) {
+        viewModelScope.launch { libraryRepository.removeHistoryItem(link) }
+    }
+
+    fun clearHistoryOnly() {
+        viewModelScope.launch { libraryRepository.clearHistory() }
+    }
+
+    fun clearFavoritesOnly() {
+        viewModelScope.launch { libraryRepository.clearBookmarks() }
+    }
+
+    fun clearAllHistoryAndFavorites() {
+        viewModelScope.launch { libraryRepository.clearAll() }
+    }
+
+    fun isBookmarked(link: String): Boolean =
+        _bookmarkedAnime.value.any { it.link == link }
+
+    // Profile & Playback Preferences Actions
+    fun updateProfile(name: String, title: String, email: String, avatarId: Int) {
+        preferencesRepository.updateProfile(
+            UserProfile(name = name, title = title, email = email, avatarId = avatarId)
+        )
+    }
+
+    fun setPreferredServer(server: String) {
+        preferencesRepository.updatePlaybackPreferences { it.copy(preferredServer = server) }
+    }
+
+    fun setDownloadQuality(quality: String) {
+        preferencesRepository.updatePlaybackPreferences { it.copy(defaultQuality = quality) }
+    }
+
+    fun setAutoPlayNext(enabled: Boolean) {
+        preferencesRepository.updatePlaybackPreferences { it.copy(autoPlayNext = enabled) }
+    }
+
+    fun setHardwareAccel(enabled: Boolean) {
+        preferencesRepository.updatePlaybackPreferences { it.copy(hardwareAccel = enabled) }
+    }
+
+    fun setNotifyUpdates(enabled: Boolean) {
+        preferencesRepository.updatePlaybackPreferences { it.copy(notifyUpdates = enabled) }
+    }
+
+    fun setDataSaver(enabled: Boolean) {
+        preferencesRepository.updatePlaybackPreferences { it.copy(dataSaver = enabled) }
+    }
+
+    fun setSubtitleStyle(style: String) {
+        preferencesRepository.updatePlaybackPreferences { it.copy(subtitleStyle = style) }
+    }
+
+    fun calculateCacheSize() {
+        viewModelScope.launch {
+            _cacheSize.value = preferencesRepository.calculateCacheSizeLabel()
+        }
+    }
+
+    fun clearAppCache() {
+        viewModelScope.launch {
+            animeRepository.invalidateCache()
+            scheduleRepository.invalidateCache()
+            _cacheSize.value = preferencesRepository.clearAppCache()
+        }
+    }
+
+    // Navigation
+    private fun isTopLevelScreen(screen: Screen): Boolean = when (screen) {
+        Screen.Home, Screen.Schedule, Screen.Catalog, Screen.Library, Screen.MyList, Screen.Profile -> true
+        else -> false
+    }
+
+    fun navigateTo(screen: Screen) {
+        val current = _activeScreen.value
+        if (current == screen) return
+
+        if (isTopLevelScreen(screen)) {
+            navigationStack.clear()
+            if (screen != Screen.Home) {
+                navigationStack.add(Screen.Home)
+            }
+        } else {
+            navigationStack.add(current)
+            if (navigationStack.size > 20) {
+                navigationStack.removeAt(0)
+            }
+        }
+        _activeScreen.value = screen
     }
 
     fun goBack(): Boolean {
@@ -448,94 +433,20 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
             _activeScreen.value = navigationStack.removeAt(navigationStack.size - 1)
             return true
         }
+        if (_activeScreen.value != Screen.Home) {
+            _activeScreen.value = Screen.Home
+            return true
+        }
         return false
     }
-
-    /**
-     * Bookmarks management (persistent via Room)
-     */
-    fun toggleBookmark(anime: ScrapedAnime) {
-        viewModelScope.launch {
-            val existing = isBookmarked(anime.link)
-            if (existing) {
-                repository.deleteByLink(anime.link)
-            } else {
-                repository.insert(
-                    SavedAnime(
-                        link = anime.link,
-                        title = anime.title,
-                        imageUrl = anime.imageUrl,
-                        status = anime.status,
-                        episode = anime.episode,
-                        score = anime.score,
-                        type = anime.type,
-                        timestamp = System.currentTimeMillis()
-                    )
-                )
-            }
-        }
-    }
-
-    fun isBookmarked(link: String): Boolean {
-        // Fast synchronous check against in-memory state flow
-        return _bookmarkedAnime.value.any { it.link == link }
-    }
-
-    private fun saveBookmarks(list: List<ScrapedAnime>) {
-        // Deprecated, Room handles saves.
-    }
-
-    private fun loadBookmarksAndHistory() {
-        // Migration: Clear old shared preferences to fulfill 'delete all history' request
-        if (sharedPrefs.contains("bookmarks")) {
-            sharedPrefs.edit().remove("bookmarks").apply()
-        }
-
-        viewModelScope.launch {
-            launch {
-                repository.allSavedAnimes.collect { savedList ->
-                    val converted = savedList.map {
-                        ScrapedAnime(
-                            title = it.title,
-                            link = it.link,
-                            imageUrl = it.imageUrl,
-                            status = it.status,
-                            episode = it.episode,
-                            score = it.score,
-                            type = it.type
-                        )
-                    }
-                    _bookmarkedAnime.value = converted
-                }
-            }
-            
-            launch {
-                repository.allHistory.collect { historyList ->
-                    val converted = historyList.map {
-                        ScrapedAnime(
-                            title = it.title,
-                            link = it.link,
-                            imageUrl = it.imageUrl,
-                            status = "",
-                            episode = "",
-                            score = "",
-                            type = ""
-                        )
-                    }
-                    _historyAnime.value = converted
-                }
-            }
-        }
-    }
-
 }
 
 sealed interface Screen {
     object Home : Screen
-    object Search : Screen // Keeping it for compatibility
+    object Search : Screen
     object Detail : Screen
     object Episode : Screen
-    object MyList : Screen // keeping for compatibility
+    object MyList : Screen
     object Schedule : Screen
     object Catalog : Screen
     object Library : Screen

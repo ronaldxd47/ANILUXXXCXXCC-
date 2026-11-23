@@ -17,7 +17,7 @@ interface SavedAnimeDao {
 
     @Query("DELETE FROM saved_animes WHERE link = :link")
     suspend fun deleteAnimeByLink(link: String)
-    
+
     @Query("DELETE FROM saved_animes")
     suspend fun deleteAll()
 
@@ -27,7 +27,10 @@ interface SavedAnimeDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertHistory(anime: HistoryAnime)
-    
+
+    @Query("DELETE FROM history_animes WHERE link = :link")
+    suspend fun deleteHistoryByLink(link: String)
+
     @Query("DELETE FROM history_animes")
     suspend fun deleteAllHistory()
 }

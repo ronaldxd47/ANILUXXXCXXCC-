@@ -2,6 +2,7 @@ package com.example.data.stream
 
 import com.example.data.stream.model.ContainerFormat
 import com.example.data.stream.model.StreamProtocol
+import com.example.data.stream.model.SubtitleTrack
 
 /**
  * Representasi tipe stream media yang didukung pemutar.
@@ -31,6 +32,7 @@ data class ResolvedStream(
     val originalIframeUrl: String = "",
     val quality: String = "Auto",
     val contentType: String = "",
+    val subtitles: List<SubtitleTrack> = emptyList(),
     val isValidated: Boolean = false,
     val resolvedTimestamp: Long = System.currentTimeMillis()
 ) {
