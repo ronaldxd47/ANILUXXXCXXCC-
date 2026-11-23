@@ -1,5 +1,5 @@
 Title: Jadwal Rilis – Samehadaku
-HTML Size: 63035
+HTML Size: 56824
 Found 2 schedule containers
 [0] Tag: div, Class: widget schedule pagess, ID: 
 Snippet: <div class="widget schedule pagess">
@@ -36,8 +36,8 @@ Snippet: <div class="content schedule post-show">
 
 Class '.schedule-card': 0 elements
 Class '.schedule': 2 elements
-  - Tag: div, Class: widget schedule pagess, Text: Senin Selasa Rabu Kamis Jumaat Sabtu Minggu TV 8.73 One Piece Action, Adventure 00:00 TV 6.8 Kuroneko to Majo no Kyoushitsu Comedy, Fantasy 01:00 TV 8
-  - Tag: div, Class: content schedule post-show, Text: Senin Selasa Rabu Kamis Jumaat Sabtu Minggu TV 8.73 One Piece Action, Adventure 00:00 TV 6.8 Kuroneko to Majo no Kyoushitsu Comedy, Fantasy 01:00 TV 8
+  - Tag: div, Class: widget schedule pagess, Text: Senin Selasa Rabu Kamis Jumaat Sabtu Minggu TV 8.73 One Piece Action, Adventure 00:00
+  - Tag: div, Class: content schedule post-show, Text: Senin Selasa Rabu Kamis Jumaat Sabtu Minggu TV 8.73 One Piece Action, Adventure 00:00
 Class '.tab-content': 0 elements
 Class '.schedule-tab': 0 elements
 Class '.sc-day': 0 elements
@@ -72,4 +72,4 @@ Containing 'Minggu': 15 elements
 
 
 --- BODY SNAPSHOT ---
-Samehadaku - Nonton Streaming Anime Sub Indo / Samehadaku - Nonton Streaming Anime Sub Indo / Anime Terbaru Daftar Anime Batch Jadwal Rilis List Anime Jadwal Rilis Film Terbaru Share × Facebook Twitter Whatsapp Telegram Copy Link Jadwal Rilis Senin Selasa Rabu Kamis Jumaat Sabtu Minggu TV 8.73 One Piece Action, Adventure 00:00 TV 6.8 Kuroneko to Majo no Kyoushitsu Comedy, Fantasy 01:00 TV 8.19 Futsutsuka na Akujo dewa Gozaimasu Fantasy, Romance 01:45 TV 7.32 Toumei na Yoru ni Kakeru Drama, Romance 22:00 TV 6.56 Degarashi Ouji Action, Adventure 23:30 TV 6.50 Gaikotsu Kishi-sama, Tadaima Isekai e Odekakechuu Season 2 Action, Adventure 23:30 Copyright © 2011-2023 - Samehadaku
+Samehadaku - Nonton Streaming Anime Sub Indo / Samehadaku - Nonton Streaming Anime Sub Indo / Anime Terbaru Daftar Anime Batch Jadwal Rilis List Anime Jadwal Rilis Film Terbaru Share × Facebook Twitter Whatsapp Telegram Copy Link Jadwal Rilis Senin Selasa Rabu Kamis Jumaat Sabtu Minggu TV 8.73 One Piece Action, Adventure 00:00 Copyright © 2011-2023 - Samehadaku

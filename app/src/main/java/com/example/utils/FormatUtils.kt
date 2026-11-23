@@ -51,4 +51,21 @@ object FormatUtils {
         val full = formatEpisodeTitle(raw)
         return full.replace("Episode ", "Eps ")
     }
+
+    /**
+     * Format durasi milidetik ke string format mm:ss atau hh:mm:ss.
+     */
+    fun formatTime(ms: Long): String {
+        val safeMs = ms.coerceAtLeast(0L)
+        val totalSeconds = (safeMs / 1000).toInt()
+        val seconds = totalSeconds % 60
+        val minutes = (totalSeconds / 60) % 60
+        val hours = totalSeconds / 3600
+        val mFormatter = java.util.Formatter(StringBuilder(), java.util.Locale.getDefault())
+        return if (hours > 0) {
+            mFormatter.format("%d:%02d:%02d", hours, minutes, seconds).toString()
+        } else {
+            mFormatter.format("%02d:%02d", minutes, seconds).toString()
+        }
+    }
 }
